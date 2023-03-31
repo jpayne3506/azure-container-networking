@@ -3,6 +3,7 @@ package telemetry
 
 import (
 	"fmt"
+
 	"github.com/Azure/azure-container-networking/aitelemetry"
 	"github.com/Azure/azure-container-networking/log"
 )
@@ -24,7 +25,7 @@ func CreateAITelemetryHandle(aiConfig aitelemetry.AIConfig, disableAll, disableM
 
 	if disableAll {
 		log.Printf("Telemetry is disabled")
-		return fmt.Errorf("Telmetry disabled")
+		return fmt.Errorf("Telemetry disabled")
 	}
 
 	th, err = aitelemetry.NewAITelemetry("", aiMetadata, aiConfig)

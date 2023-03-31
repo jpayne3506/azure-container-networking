@@ -303,8 +303,15 @@ func ReadConfigFile(filePath string) (TelemetryConfig, error) {
 
 // ConnectToTelemetryService - Attempt to spawn telemetry process if it's not already running.
 func (tb *TelemetryBuffer) ConnectToTelemetryService(telemetryNumRetries, telemetryWaitTimeInMilliseconds int) {
-	path, dir := getTelemetryServiceDirectory()
+
+	path, dir, fileExists := getTelemetryServiceDirectory()
 	args := []string{"-d", dir}
+
+	if fileExists {
+		log.Logf("Skip starting telemetry service as file didn't exist")
+		return
+	}
+
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := tb.Connect(); err != nil {
 			log.Logf("Connection to telemetry socket failed: %v", err)
@@ -319,14 +326,15 @@ func (tb *TelemetryBuffer) ConnectToTelemetryService(telemetryNumRetries, teleme
 	}
 }
 
-func getTelemetryServiceDirectory() (path string, dir string) {
+func getTelemetryServiceDirectory() (path string, dir string, fileExists bool) {
 	path = fmt.Sprintf("%v/%v", CniInstallDir, TelemetryServiceProcessName)
+	fileExists = true
 	if exists, _ := platform.CheckIfFileExists(path); !exists {
 		ex, _ := os.Executable()
 		exDir := filepath.Dir(ex)
 		path = fmt.Sprintf("%v/%v", exDir, TelemetryServiceProcessName)
 		if exists, _ = platform.CheckIfFileExists(path); !exists {
-			log.Logf("Skip starting telemetry service as file didn't exist")
+			fileExists = false
 			return
 		}
 		dir = exDir
