@@ -305,14 +305,13 @@ func (tb *TelemetryBuffer) ConnectToTelemetryService(telemetryNumRetries, teleme
 	path, dir := getTelemetryServiceDirectory()
 	args := []string{"-d", dir}
 
-	if _, exists := os.Stat(path); exists != nil {
-		log.Logf("Skip starting telemetry service as file didn't exist")
-		return
-	}
-
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := tb.Connect(); err != nil {
 			log.Logf("Connection to telemetry socket failed: %v", err)
+			if _, exists := os.Stat(path); exists != nil {
+				log.Logf("Skip starting telemetry service as file didn't exist")
+				return
+			}
 			tb.Cleanup(FdName)
 			StartTelemetryService(path, args)
 			WaitForTelemetrySocket(telemetryNumRetries, time.Duration(telemetryWaitTimeInMilliseconds))
