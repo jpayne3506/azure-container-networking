@@ -13,7 +13,7 @@ var (
 	th                   aitelemetry.TelemetryHandle
 	gDisableTrace        bool
 	gDisableMetric       bool
-	ErrTelemetryDisabled = errors.New("telemetry is disabled")
+	errTelemetryDisabled = errors.New("telemetry is disabled")
 )
 
 const (
@@ -26,7 +26,7 @@ func CreateAITelemetryHandle(aiConfig aitelemetry.AIConfig, disableAll, disableM
 
 	if disableAll {
 		log.Printf("Telemetry is disabled")
-		return ErrTelemetryDisabled
+		return errTelemetryDisabled
 	}
 
 	th, err = aitelemetry.NewAITelemetry("", aiMetadata, aiConfig)
