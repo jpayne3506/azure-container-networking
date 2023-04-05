@@ -26,7 +26,7 @@ func CreateAITelemetryHandle(aiConfig aitelemetry.AIConfig, disableAll, disableM
 
 	if disableAll {
 		log.Printf("Telemetry is disabled")
-		return errTelemetryDisabled
+		return ErrTelemetryDisabled
 	}
 
 	th, err = aitelemetry.NewAITelemetry("", aiMetadata, aiConfig)
