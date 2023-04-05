@@ -13,7 +13,7 @@ var (
 	th                   aitelemetry.TelemetryHandle
 	gDisableTrace        bool
 	gDisableMetric       bool
-	errTelemetryDisabled = errors.New("telemetry is disabled")
+	ErrTelemetryDisabled = errors.New("telemetry is disabled")
 )
 
 const (
