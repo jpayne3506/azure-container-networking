@@ -146,6 +146,23 @@ stages:
 
           - publish: ./test/apimodels/
             artifact: clusterdefinitions
+      - job: k8se2e
+        displayName: "Build Kubernetes Test Suite Binary"
+        pool:
+          name: $(BUILD_POOL_NAME_DEFAULT)
+          demands:
+            - agent.os -equals Linux
+            - Role -equals Build
+        steps:
+          - bash: |
+              git clone https://github.com/huntergregory/kubernetes.git --depth=1 --branch=linux-sleep-before-probing
+              cd kubernetes
+              export PATH=$PATH:/usr/local/go/bin/
+              make WHAT=test/e2e/e2e.test
+            displayName: "Build Kubernetes e2e.test"
+
+          - publish: $(System.DefaultWorkingDirectory)/kubernetes/_output/local/bin/linux/amd64
+            artifact: Test
 
   - stage: containerize
     displayName: Build Images
@@ -267,7 +284,7 @@ stages:
               echo $TAG
               echo $CURRENT_VERSION
               echo "Checking if branch up to date with master"
-  
+
   - stage: publish
     displayName: Publish Multiarch Manifests
     dependsOn:
@@ -316,6 +333,76 @@ stages:
             displayName: "Set current tag variable"
             condition: always()
 
+  - stage: cluster
+    displayName: Publish Multiarch Manifests
+    dependsOn:
+      - containerize # Timing off of publish stage. Don't want clusters sitting doing nothing
+    jobs:
+      - job: create_cluster
+        displayName: Create Clusters
+        pool:
+          name: "$(BUILD_POOL_NAME_LINUX_ARM64)"
+        strategy:
+          matrix:
+            cilium_e2e:
+              displayName: Cilium
+              clusterType: swift-no-kube-proxy-up
+              clusterName: 'cilium_e2e'
+              vmSize: Standard_B2ms
+              k8sVersion: ""
+              windowsOsSku: ""
+            cilium_overlay_cilium_e2e:
+              displayName: Cilium on AKS Overlay
+              clusterType: overlay-no-kube-proxy-up
+              clusterName: 'overlaye2e'
+              vmSize: Standard_B2ms
+              k8sVersion: ""
+              windowsOsSku: ""
+            aks_swift_e2e:
+              displayName: AKS Swift Ubuntu
+              clusterType: byocni-up
+              clusterName: 'swifte2e'
+              vmSize: Standard_B2
+              k8sVersion: ""
+              windowsOsSku: ""
+            aks_ubuntu_18_04_linux_e2e:
+              displayName: AKS Ubuntu 18.04
+              clusterType: linux-cniv1-up
+              clusterName: 'ubuntu18e2e'
+              vmSize: Standard_B2
+              k8sVersion: 1.24.9
+              windowsOsSku: ""
+            aks_ubuntu_22_linux_e2e:
+              displayName: AKS Ubuntu 22
+              clusterType: linux-cniv1-up
+              clusterName: 'ubuntu22e2e'
+              vmSize: Standard_B2
+              k8sVersion: 1.25
+              windowsOsSku: ""
+            aks_windows_19_03_e2e:
+              displayName: AKS Windows 1903
+              clusterType: windows-cniv1-up
+              clusterName: 'win19e2e'
+              vmSize: Standard_B2ms
+              k8sVersion: ""
+              windowsOsSku: 'Windows2019'
+            aks_windows_22_e2e:
+              displayName: AKS Windows 2022
+              clusterType: windows-cniv1-up
+              clusterName: 'win22e2e'
+              vmSize: Standard_B2ms
+              k8sVersion: ""
+              windowsOsSku: 'Windows2022'
+        steps:
+          - template: singletenancy/aks/e2e-cluster-template.yaml
+            parameters:
+              displayName: $(displayName)
+              clusterType: $(clusterType)
+              clusterName: $(clusterName)
+              vmSize: $(vmSize)
+              k8sVersion: $(k8sVersion)
+              windowsOsSku: $(windowsOsSku)
+
   - template: singletenancy/cilium/cilium-e2e-job-template.yaml
     parameters:
       name: "cilium_e2e"
@@ -349,7 +436,9 @@ stages:
       os: 'linux'
       clusterType: linux-cniv1-up
       clusterName: 'ubuntu18e2e'
+      vmSize: Standard_B2
       k8sVersion: 1.24.9
+      scaleup: 100
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
@@ -359,7 +448,9 @@ stages:
       os: 'linux'
       clusterType: linux-cniv1-up
       clusterName: 'ubuntu22e2e'
+      vmSize: Standard_B2
       k8sVersion: 1.25
+      scaleup: 100
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
@@ -369,8 +460,10 @@ stages:
       os: windows
       clusterType: windows-cniv1-up
       clusterName: 'win19e2e'
+      vmSize: Standard_B2ms
       windowsOsSku: 'Windows2019'
       os_version: 'ltsc2019'
+      scaleup: 100
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
@@ -380,28 +473,10 @@ stages:
       os: windows
       clusterType: windows-cniv1-up
       clusterName: 'win22e2e'
+      vmSize: Standard_B2ms
       windowsOsSku: 'Windows2022'
       os_version: 'ltsc2022'
-
-  - template: singletenancy/aks-engine/e2e-job-template.yaml
-    parameters:
-      name: "ubuntu_18_04_linux_e2e"
-      displayName: Ubuntu 18.04
-      pipelineBuildImage: "$(BUILD_IMAGE)"
-      clusterDefinition: "cniLinux1804.json"
-      clusterDefinitionCniTypeKey: "azureCNIURLLinux"
-      clusterDefinitionCniBuildOS: "linux"
-      clusterDefinitionCniBuildExt: ".tgz"
-
-  - template: singletenancy/aks-engine/e2e-job-template.yaml
-    parameters:
-      name: "windows_19_03_e2e"
-      displayName: "Windows 1903"
-      pipelineBuildImage: "$(BUILD_IMAGE)"
-      clusterDefinition: "cniWindows1903.json"
-      clusterDefinitionCniTypeKey: "azureCNIURLWindows"
-      clusterDefinitionCniBuildOS: "windows"
-      clusterDefinitionCniBuildExt: ".zip"
+      scaleup: 100
 
   - stage: validate2
     displayName: Validate Tags
@@ -422,18 +497,17 @@ stages:
               echo $TAG
               echo $CURRENT_VERSION
               echo "Checking if branch is up to date with master"
-  
+
   - stage: cleanup
     displayName: Cleanup
     dependsOn:
       - "aks_swift_e2e"
       - "cilium_e2e"
+      - "cilium_overlay_cilium_e2e"
       - "aks_ubuntu_18_04_linux_e2e"
       - "aks_windows_19_03_e2e"
       - "aks_ubuntu_22_linux_e2e"
       - "aks_windows_22_e2e"
-      - "ubuntu_18_04_linux_e2e"
-      - "windows_19_03_e2e"
     jobs:
       - job: delete_remote_artifacts
         displayName: Delete remote artifacts
