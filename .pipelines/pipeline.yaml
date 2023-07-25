@@ -316,61 +316,61 @@ stages:
             displayName: "Set current tag variable"
             condition: always()
 
-  - stage: cluster
-    displayName: Create Clusters
-    dependsOn:
-      - containerize # Timing off of publish stage. Don't want clusters sitting doing nothing
-    jobs:
-      - job: create_cluster
-        displayName: Create
-        pool:
-          name: "$(BUILD_POOL_NAME_DEFAULT)"
-        strategy:
-          matrix:
-            cilium_e2e:
-              displayName: Cilium
-              clusterType: swift-no-kube-proxy-up
-              clusterName: 'ciliume2e'
-              vmSize: Standard_B2ms
-              k8sVersion: ""
-              windowsOsSku: ""
-            cilium_overlay_cilium_e2e:
-              displayName: Cilium on AKS Overlay
-              clusterType: overlay-no-kube-proxy-up
-              clusterName: 'overlaye2e'
-              vmSize: Standard_B2ms
-              k8sVersion: ""
-              windowsOsSku: ""
-            aks_swift_e2e:
-              displayName: AKS Swift Ubuntu
-              clusterType: byocni-up
-              clusterName: 'swifte2e'
-              vmSize: Standard_B2s
-              k8sVersion: ""
-              windowsOsSku: ""
-            aks_ubuntu_22_linux_e2e:
-              displayName: AKS Ubuntu 22
-              clusterType: linux-cniv1-up
-              clusterName: 'ubuntu22e2e'
-              vmSize: Standard_B2s
-              k8sVersion: 1.25
-              windowsOsSku: ""
-            aks_windows_22_e2e:
-              displayName: AKS Windows 2022
-              clusterType: windows-cniv1-up
-              clusterName: 'win22e2e'
-              vmSize: Standard_B2ms
-              k8sVersion: ""
-              windowsOsSku: 'Windows2022'
-        steps:
-          - template: singletenancy/aks/e2e-cluster-template.yaml
-            parameters:
-              displayName: $(displayName)
-              clusterType: $(clusterType)
-              clusterName: $(clusterName)
-              vmSize: $(vmSize)
-              k8sVersion: $(k8sVersion)
-              windowsOsSku: $(windowsOsSku)
+  # - stage: cluster
+  #   displayName: Create Clusters
+  #   dependsOn:
+  #     - containerize # Timing off of publish stage. Don't want clusters sitting doing nothing
+  #   jobs:
+  #     - job: create_cluster
+  #       displayName: Create
+  #       pool:
+  #         name: "$(BUILD_POOL_NAME_DEFAULT)"
+  #       strategy:
+  #         matrix:
+            # cilium_e2e:
+            #   displayName: Cilium
+            #   clusterType: swift-no-kube-proxy-up
+            #   clusterName: 'ciliume2e'
+            #   vmSize: Standard_B2ms
+            #   k8sVersion: ""
+            #   windowsOsSku: ""
+            # cilium_overlay_cilium_e2e:
+            #   displayName: Cilium on AKS Overlay
+            #   clusterType: overlay-no-kube-proxy-up
+            #   clusterName: 'overlaye2e'
+            #   vmSize: Standard_B2ms
+            #   k8sVersion: ""
+            #   windowsOsSku: ""
+            # aks_swift_e2e:
+            #   displayName: AKS Swift Ubuntu
+            #   clusterType: byocni-up
+            #   clusterName: 'swifte2e'
+  #             vmSize: Standard_B2s
+              # k8sVersion: ""
+              # windowsOsSku: ""
+  #           aks_ubuntu_22_linux_e2e:
+  #             displayName: AKS Ubuntu 22
+  #             clusterType: linux-cniv1-up
+  #             clusterName: 'ubuntu22e2e'
+  #             vmSize: Standard_B2s
+  #             k8sVersion: 1.25
+  #             windowsOsSku: ""
+  #           aks_windows_22_e2e:
+  #             displayName: AKS Windows 2022
+  #             clusterType: windows-cniv1-up
+  #             clusterName: 'win22e2e'
+  #             vmSize: Standard_B2ms
+  #             k8sVersion: ""
+  #             windowsOsSku: 'Windows2022'
+  #       steps:
+  #         - template: singletenancy/aks/e2e-cluster-template.yaml
+  #           parameters:
+  #             displayName: $(displayName)
+  #             clusterType: $(clusterType)
+  #             clusterName: $(clusterName)
+  #             vmSize: $(vmSize)
+  #             k8sVersion: $(k8sVersion)
+  #             windowsOsSku: $(windowsOsSku)
 
   - template: singletenancy/cilium/cilium-e2e-job-template.yaml
     parameters:
@@ -378,7 +378,12 @@ stages:
       displayName: Cilium
       pipelineBuildImage: "$(BUILD_IMAGE)"
       testDropgz: ""
+      clusterType: swift-no-kube-proxy-up
       clusterName: "ciliume2e"
+      vmSize: Standard_B2ms
+      k8sVersion: ""
+      windowsOsSku: ""
+      dependsOn: 'containerize'
 
   - template: singletenancy/cilium-overlay/cilium-overlay-e2e-job-template.yaml
     parameters:
@@ -386,7 +391,12 @@ stages:
       displayName: Cilium on AKS Overlay
       pipelineBuildImage: "$(BUILD_IMAGE)"
       testDropgz: ""
+      clusterType: overlay-no-kube-proxy-up
       clusterName: "overlaye2e"
+      vmSize: Standard_B2ms
+      k8sVersion: ""
+      windowsOsSku: ""
+      dependsOn: 'containerize'
 
   - template: singletenancy/aks-swift/e2e-job-template.yaml
     parameters:
@@ -394,8 +404,13 @@ stages:
       displayName: AKS Swift Ubuntu
       pipelineBuildImage: "$(BUILD_IMAGE)"
       testDropgz: ""
+      clusterType: byocni-up
       clusterName: "swifte2e"
+      vmSize: Standard_B2s
+      k8sVersion: ""
+      windowsOsSku: ""
       osSku: "Ubuntu"
+      dependsOn: 'containerize'
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
@@ -420,6 +435,7 @@ stages:
       vmSize: Standard_B2
       k8sVersion: 1.25
       scaleup: 100
+      dependsOn: 'containerize'
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
@@ -446,6 +462,7 @@ stages:
       windowsOsSku: 'Windows2022'
       os_version: 'ltsc2022'
       scaleup: 50
+      dependsOn: 'containerize'
 
   - stage: validate2
     displayName: Validate Tags
