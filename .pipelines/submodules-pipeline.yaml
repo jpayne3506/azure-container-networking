@@ -262,7 +262,7 @@ stages:
       pipelineBuildImage: "$(BUILD_IMAGE)"
       testDropgz: true
       clusterType: overlay-no-kube-proxy-up
-      clusterName: "submodsoverlaye2e"
+      clusterName: "submodoverlaye2e"
       vmSize: Standard_B2ms
       k8sVersion: ""
       windowsOsSku: ""

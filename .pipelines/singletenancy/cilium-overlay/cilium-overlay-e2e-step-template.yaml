@@ -152,6 +152,11 @@ steps:
       # Deleting echo-external-node deployment until version matches TODO. Upstream TODO has change. - Replace todo with vipul work/PR in upstream
       # Saves 17 minutes
       kubectl delete deploy -n cilium-test echo-external-node
+      if [ "$CILIUM_VERSION_TAG" = "cilium-nightly-pipeline" ]; then
+        echo "Check cilium identities in cilium-test namepsace during nightly run"
+        echo "expect the identities to be deleted when the namespace is deleted"
+        kubectl get ciliumidentity | grep cilium-test
+      fi
       make test-validate-state
       echo "delete cilium connectivity test resources and re-validate state"
       kubectl delete ns cilium-test
@@ -159,6 +164,33 @@ steps:
       make test-validate-state
     name: "validatePods"
     displayName: "Validate Pods"
+
+  - script: |
+      if [ "$CILIUM_VERSION_TAG" = "cilium-nightly-pipeline" ]; then
+        kubectl get pod -owide -n cilium-test
+        echo "wait for pod and cilium identity deletion in cilium-test namespace"
+        ns="cilium-test"
+        while true; do
+          pods=$(kubectl get pods -n $ns --no-headers=true 2>/dev/null)
+          if [[ -z "$pods" ]]; then
+            echo "No pods found"
+              break
+          fi
+          sleep 2s
+        done
+        sleep 20s
+        echo "Verify cilium identities are deleted from cilium-test"
+        checkIdentity="$(kubectl get ciliumidentity -o json | grep cilium-test | jq -e 'length == 0')"
+        if [[ -n $checkIdentity ]]; then
+          echo "##[error]Cilium Identities still present in cilium-test namespace"
+        else
+          printf -- "Identities deleted from cilium-test namespace\n"
+        fi
+      else
+        echo "skip cilium identities check for PR pipeline"
+      fi
+    name: "CiliumIdentities"
+    displayName: "Verify Cilium Identities Deletion"
 
   - script: |
       echo "validate pod IP assignment before CNS restart"
@@ -196,6 +228,7 @@ steps:
       scriptType: "bash"
       addSpnToEnvironment: true
       inlineScript: |
+        set -e
         echo "Deleting cluster"
         make -C ./hack/aks azcfg AZCLI=az
         make -C ./hack/aks down SUB=$(SUB_AZURE_NETWORK_AGENT_TEST) AZCLI=az CLUSTER=${{ parameters.clusterName }}-$(make revision)
