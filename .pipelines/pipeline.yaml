@@ -367,6 +367,7 @@ stages:
       vmSize: Standard_B2s
       k8sVersion: 1.25
       scaleup: 100
+      dependsOn: 'containerize'
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
