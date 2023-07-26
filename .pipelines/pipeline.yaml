@@ -353,7 +353,6 @@ stages:
       vmSize: Standard_B2s
       k8sVersion: ""
       windowsOsSku: ""
-      osSku: "Ubuntu"
       dependsOn: 'containerize'
 
   - template: singletenancy/aks/e2e-job-template.yaml
