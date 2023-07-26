@@ -378,7 +378,12 @@ stages:
       displayName: Cilium
       pipelineBuildImage: "$(BUILD_IMAGE)"
       testDropgz: ""
+      clusterType: swift-no-kube-proxy-up
       clusterName: "ciliume2e"
+      vmSize: Standard_B2ms
+      k8sVersion: ""
+      windowsOsSku: ""
+      dependsOn: 'containerize'
 
   - template: singletenancy/cilium-overlay/cilium-overlay-e2e-job-template.yaml
     parameters:
@@ -386,7 +391,12 @@ stages:
       displayName: Cilium on AKS Overlay
       pipelineBuildImage: "$(BUILD_IMAGE)"
       testDropgz: ""
+      clusterType: overlay-no-kube-proxy-up
       clusterName: "overlaye2e"
+      vmSize: Standard_B2ms
+      k8sVersion: ""
+      windowsOsSku: ""
+      dependsOn: 'containerize'
 
   - template: singletenancy/aks-swift/e2e-job-template.yaml
     parameters:
@@ -394,8 +404,12 @@ stages:
       displayName: AKS Swift Ubuntu
       pipelineBuildImage: "$(BUILD_IMAGE)"
       testDropgz: ""
+      clusterType: byocni-up
       clusterName: "swifte2e"
-      osSku: "Ubuntu"
+      vmSize: Standard_B2s
+      k8sVersion: ""
+      windowsOsSku: ""
+      dependsOn: 'containerize'
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
@@ -408,6 +422,7 @@ stages:
       vmSize: Standard_B2s
       k8sVersion: 1.25
       scaleup: 100
+      dependsOn: 'containerize'
 
   - template: singletenancy/aks/e2e-job-template.yaml
     parameters:
@@ -420,7 +435,8 @@ stages:
       vmSize: Standard_B2ms
       windowsOsSku: 'Windows2022'
       os_version: 'ltsc2022'
-      scaleup: 100
+      scaleup: 50
+      dependsOn: 'containerize'
 
   - stage: validate2
     displayName: Validate Tags
@@ -441,6 +457,7 @@ stages:
               echo $TAG
               echo $CURRENT_VERSION
               echo "Checking if branch is up to date with master"
+
 
   - stage: cleanup
     displayName: Cleanup

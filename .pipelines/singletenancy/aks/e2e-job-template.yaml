@@ -10,8 +10,20 @@ parameters:
   windowsOsSku: ""
   os_version: ""
   scaleup: ""
+  dependsOn: ""
 
 stages:
+  - template: ../../templates/create-cluster.yaml
+    parameters:
+      name: ${{ parameters.name }}
+      displayName: ${{ parameters.displayName }}
+      clusterType: ${{ parameters.clusterType }}
+      clusterName: ${{ parameters.clusterName }}
+      vmSize: ${{ parameters.vmSize }}
+      k8sVersion: ${{ parameters.k8sVersion }}
+      windowsOsSku: ${{ parameters.windowsOsSku }}
+      dependsOn: ${{ parameters.dependsOn }}
+
   - stage: ${{ parameters.name }}
     displayName: E2E - ${{ parameters.displayName }}
     variables:
@@ -23,6 +35,7 @@ stages:
     dependsOn:
     - setup
     - publish
+    - ${{ parameters.clusterName }}
     jobs:
       - job: ${{ parameters.name }}
         displayName: Singletenancy AKS - (${{ parameters.name }})
@@ -55,7 +68,6 @@ stages:
           datapath: true
           dns: true
           portforward: true
-          loadBalancer: true
           hybridWin: true
           service: true
           hostport: true
@@ -84,5 +96,3 @@ stages:
                 make -C ./hack/aks down AZCLI=az REGION=$(REGION_AKS_CLUSTER_TEST) SUB=$(SUB_AZURE_NETWORK_AGENT_TEST) CLUSTER=${{ parameters.clusterName }}-$(make revision)
                 echo "Cluster and resources down"
             displayName: "Delete test cluster"
-
-
