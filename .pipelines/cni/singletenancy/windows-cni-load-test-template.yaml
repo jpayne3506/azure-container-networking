@@ -53,8 +53,7 @@ stages:
 
   - stage: binaries
     displayName: Build Binaries
-    dependsOn:
-      - setup
+    dependsOn: ${{ parameters.dependsOn }}
     jobs:
       - job:
         displayName: "Build Kubernetes Test Suite Binary"
@@ -68,7 +67,7 @@ stages:
               make WHAT=test/e2e/e2e.test
             displayName: "Build Kubernetes e2e.test"
           - publish: $(System.DefaultWorkingDirectory)/kubernetes/_output/local/bin/linux/amd64
-            artifact: Test
+            artifact: npm_k8s
 
   - stage:  update_cni
     dependsOn:
@@ -159,17 +158,17 @@ stages:
               os: ${{ parameters.os }}
               cni: ${{ parameters.cni }}
 
+#  $(AZURE_TEST_AGENT_SERVICE_CONNECTION)
   - stage: npm
     jobs:
       - template: ../../npm/npm-cni-integration-test.yaml
         parameters:
-          sub: $(AZURE_TEST_AGENT_SERVICE_CONNECTION)
           clusterName: ${{ parameters.clusterName }}
           os: ${{ parameters.os }}
-          os_version: ${{ parameters.os_version }}
+          sub: $(TEST_SUB_SERVICE_CONNECTION)
+          os_version: 'ltsc2022'
           dependsOn: validate_state_windows
           tag: $(npmVersion)
-
 
 
   - stage: delete_resources
