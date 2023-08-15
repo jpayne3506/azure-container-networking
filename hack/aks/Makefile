@@ -21,7 +21,7 @@ SUB        ?= $(AZURE_SUBSCRIPTION)
 CLUSTER    ?= $(USER)-$(REGION)
 GROUP      ?= $(CLUSTER)
 VNET       ?= $(CLUSTER)
-
+EXISTS     ?= false
 ##@ Help
 
 help:  ## Display this help
@@ -65,7 +65,7 @@ vars: ## Show the input vars configured for the cluster commands
 ##@ SWIFT Infra
 
 rg-up: ## Create resource group
-ifeq (@$(MAKE) rg-exists, false)
+ifeq ($(EXISTS), false)
 	@$(AZCLI) group create --location $(REGION) --name $(GROUP)
 else
 	@echo "Group already exists. Continue."
