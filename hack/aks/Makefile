@@ -65,7 +65,11 @@ vars: ## Show the input vars configured for the cluster commands
 ##@ SWIFT Infra
 
 rg-up: ## Create resource group
+ifeq (@$(AZCLI) group exist --name $(GROUP),false)
 	@$(AZCLI) group create --location $(REGION) --name $(GROUP)
+else
+	@echo "Group already exists. Continue."
+endif
 
 rg-down: ## Delete resource group
 	$(AZCLI) group delete -g $(GROUP) --yes
