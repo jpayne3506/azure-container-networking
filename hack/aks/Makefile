@@ -65,7 +65,7 @@ vars: ## Show the input vars configured for the cluster commands
 ##@ SWIFT Infra
 
 rg-up: ## Create resource group
-ifeq ($(AZCLI) group exist --name $(GROUP), false)
+ifeq ($(AZCLI) group exists --name $(GROUP), false)
 	@$(AZCLI) group create --location $(REGION) --name $(GROUP)
 else
 	@echo "Group already exists. Continue."
@@ -75,7 +75,7 @@ rg-down: ## Delete resource group
 	$(AZCLI) group delete -g $(GROUP) --yes
 
 rg-exists:
-	$(AZCLI) group exist --name $(GROUP)
+	$(AZCLI) group exists --name $(GROUP)
 
 swift-net-up: ## Create vnet, nodenet and podnet subnets
 	$(AZCLI) network vnet create -g $(GROUP) -l $(REGION) --name $(VNET) --address-prefixes 10.0.0.0/8 -o none
