@@ -21,7 +21,7 @@ SUB        ?= $(AZURE_SUBSCRIPTION)
 CLUSTER    ?= $(USER)-$(REGION)
 GROUP      ?= $(CLUSTER)
 VNET       ?= $(CLUSTER)
-EXISTS     ?= false
+EXISTS     ?= $(shell $(AZCLI) group exists -g $(GROUP))
 ##@ Help
 
 help:  ## Display this help
@@ -75,7 +75,7 @@ rg-down: ## Delete resource group
 	$(AZCLI) group delete -g $(GROUP) --yes
 
 rg-exists:
-	$(AZCLI) group exists -g $(GROUP)
+	@echo $(EXISTS)
 
 swift-net-up: ## Create vnet, nodenet and podnet subnets
 	$(AZCLI) network vnet create -g $(GROUP) -l $(REGION) --name $(VNET) --address-prefixes 10.0.0.0/8 -o none
