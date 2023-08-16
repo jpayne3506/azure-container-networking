@@ -73,7 +73,7 @@ RG_LIST     ?= $(shell $(AZCLI) group list -o table --query "[?location=='$(REGI
 
 
 rg-up: ## Create resource group
-ifeq ($(EXISTS), false)
+ifeq ($(RG_EXISTS), false)
 	@$(AZCLI) group create --location $(REGION) --name $(GROUP)
 else
 	@echo "Group already exists. Continue."
