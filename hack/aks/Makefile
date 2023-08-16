@@ -7,6 +7,9 @@ AZCFG   = $(HOME)/.azure
 AZIMG   = mcr.microsoft.com/azure-cli
 AZCLI   ?= docker run --rm -v $(AZCFG):/root/.azure -v $(KUBECFG):/root/.kube -v $(SSH):/root/.ssh -v $(PWD):/root/tmpsrc $(AZIMG) az
 
+# Git Repo
+COMMIT_ID   ?= $(shell git rev-parse --short HEAD)
+
 # overrideable defaults
 REGION          ?= westus2
 OS_SKU          ?= Ubuntu
@@ -21,7 +24,7 @@ SUB        ?= $(AZURE_SUBSCRIPTION)
 CLUSTER    ?= $(USER)-$(REGION)
 GROUP      ?= $(CLUSTER)
 VNET       ?= $(CLUSTER)
-EXISTS     ?= $(shell $(AZCLI) group exists -g $(GROUP))
+
 ##@ Help
 
 help:  ## Display this help
@@ -60,9 +63,14 @@ vars: ## Show the input vars configured for the cluster commands
 	@echo VM_SIZE=$(VM_SIZE)
 	@echo NODE_COUNT=$(NODE_COUNT)
 	@echo VMSS_NAME=$(VMSS_NAME)
-
+	@echo COMMIT_ID=$(COMMIT_ID)
 
 ##@ SWIFT Infra
+
+# Resource Group Commands
+RG_EXISTS   ?= $(shell $(AZCLI) group exists -g $(GROUP))
+RG_LIST     ?= $(shell $(AZCLI) group list -o table --query "[?location=='$(REGION)'].name" | grep $(COMMIT_ID) | grep -v MC)
+
 
 rg-up: ## Create resource group
 ifeq ($(EXISTS), false)
@@ -75,7 +83,19 @@ rg-down: ## Delete resource group
 	$(AZCLI) group delete -g $(GROUP) --yes
 
 rg-exists:
-	@echo $(EXISTS)
+	@echo $(RG_EXISTS)
+
+rg-list: ## Requires AZCLI, REGION, COMMIT_ID
+	@echo $(RG_LIST)
+
+rg-down-complete:
+	$(MAKE) rg-list
+	$(foreach RG,$(RG_LIST),\
+			$(MAKE) rg-down GROUP=$(RG);\
+	)\
+
+
+
 
 swift-net-up: ## Create vnet, nodenet and podnet subnets
 	$(AZCLI) network vnet create -g $(GROUP) -l $(REGION) --name $(VNET) --address-prefixes 10.0.0.0/8 -o none
@@ -267,7 +287,7 @@ dualstack-overlay-byocni-up: rg-up overlay-net-up ## Brings up an dualstack Over
 down: ## Delete the cluster
 	$(AZCLI) aks delete -g $(GROUP) -n $(CLUSTER) --yes
 	@$(MAKE) unset-kubeconf
-	@$(MAKE) rg-down
+
 
 restart-vmss: ## Restarts the nodes in the cluster
 	$(AZCLI) vmss restart -g MC_${GROUP}_${CLUSTER}_${REGION} --name $(VMSS_NAME)
