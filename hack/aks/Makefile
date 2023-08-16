@@ -82,19 +82,26 @@ endif
 rg-down: ## Delete resource group
 	$(AZCLI) group delete -g $(GROUP) --yes
 
-rg-exists:
+rg-down-no-wait: ## Delete resource group with no wait
+	$(AZCLI) group delete -g $(GROUP) --yes --no-wait
+
+rg-exists: ## Report true/false if the RG exists
 	@echo $(RG_EXISTS)
 
 rg-list: ## Requires AZCLI, REGION, COMMIT_ID
 	@echo $(RG_LIST)
 
-rg-down-complete:
+rg-down-complete: ## Requires AZCLI, REGION, COMMIT_ID
 	$(MAKE) rg-list
 	$(foreach RG,$(RG_LIST),\
 			$(MAKE) rg-down GROUP=$(RG);\
 	)\
 
-
+rg-down-complete-no-wait: ## Requires AZCLI, REGION, COMMIT_ID
+	$(MAKE) rg-list
+	$(foreach RG,$(RG_LIST),\
+			$(MAKE) rg-down-no-wait GROUP=$(RG);\
+	)\
 
 
 swift-net-up: ## Create vnet, nodenet and podnet subnets
@@ -287,7 +294,7 @@ dualstack-overlay-byocni-up: rg-up overlay-net-up ## Brings up an dualstack Over
 down: ## Delete the cluster
 	$(AZCLI) aks delete -g $(GROUP) -n $(CLUSTER) --yes
 	@$(MAKE) unset-kubeconf
-
+	@$(MAKE) rg-down
 
 restart-vmss: ## Restarts the nodes in the cluster
 	$(AZCLI) vmss restart -g MC_${GROUP}_${CLUSTER}_${REGION} --name $(VMSS_NAME)

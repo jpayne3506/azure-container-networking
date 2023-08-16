@@ -15,10 +15,15 @@ Utilities
   shell            print $AZCLI so it can be used outside of make
 
 SWIFT Infra
-  vars             Show the env vars configured for the swift command
-  rg-up            Create resource group $GROUP in $SUB/$REGION
-  rg-down          Delete the $GROUP in $SUB/$REGION
-  net-up           Create required swift vnet/subnets
+  vars                        Show the env vars configured for the swift command
+  rg-up                       Create resource group $GROUP in $SUB/$REGION
+  rg-down                     Delete the $GROUP in $SUB/$REGION
+  rg-down-no-wait             Delete the $GROUP in $SUB/$REGION with no wait
+  rg-exists                   Show that the Resource $GROUP exists
+  rg-list                     Show the Resource Group list with a given $REGION and $COMMIT_ID
+  rg-down-complete            Delete the entire Resource Group List with a given $REGION and $COMMIT_ID
+  rg-down-complete-no-wait    Delete the entire Resource Group List with a given $REGION and $COMMIT_ID with no wait
+  net-up                      Create required swift vnet/subnets
 
 AKS Clusters
   byocni-up                    Alias to swift-byocni-up
