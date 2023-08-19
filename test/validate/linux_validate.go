@@ -18,6 +18,7 @@ var (
 	restartNetworkCmd     = []string{"bash", "-c", "chroot /host /bin/bash -c 'systemctl restart systemd-networkd'"}
 	cnsStateFileCmd       = []string{"bash", "-c", "cat /var/run/azure-cns/azure-endpoints.json"}
 	azureVnetStateFileCmd = []string{"bash", "-c", "cat /var/run/azure-vnet.json"}
+	azureVnetStateIpamCmd = []string{"bash", "-c", "cat /var/run/azure-vnet-ipam.json"}
 	ciliumStateFileCmd    = []string{"bash", "-c", "cilium endpoint list -o json"}
 	cnsLocalCacheCmd      = []string{"curl", "localhost:10090/debug/ipaddresses", "-d", "{\"IPConfigStateFilter\":[\"Assigned\"]}"}
 )
@@ -35,6 +36,10 @@ var linuxChecksMap = map[string][]check{
 		{"cns", cnsStateFileIps, cnsLabelSelector, privilegedNamespace, cnsStateFileCmd},
 		{"cilium", ciliumStateFileIps, ciliumLabelSelector, privilegedNamespace, ciliumStateFileCmd},
 		{"cns cache", cnsCacheStateFileIps, cnsLabelSelector, privilegedNamespace, cnsLocalCacheCmd},
+	},
+	"cniv1": {
+		{"azure-vnet", azureVnetStateIps, privilegedLabelSelector, privilegedNamespace, azureVnetStateFileCmd},
+		{"azure-vnet-ipam", azureVnetStateIpamIps, privilegedLabelSelector, privilegedNamespace, azureVnetStateIpamCmd},
 	},
 	"cniv2": {
 		{"cns cache", cnsCacheStateFileIps, cnsLabelSelector, privilegedNamespace, cnsLocalCacheCmd},
@@ -194,4 +199,46 @@ func azureDualStackStateFileIPs(result []byte) (map[string]string, error) {
 		}
 	}
 	return azureCnsPodIps, nil
+}
+
+func azureVnetStateIps(result []byte) (map[string]string, error) {
+	var azureVnetResult AzureCniState
+	err := json.Unmarshal(result, &azureVnetResult)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to unmarshal azure vnet")
+	}
+
+	azureVnetPodIps := make(map[string]string)
+	for _, v := range azureVnetResult.AzureCniState.ExternalInterfaces {
+		for _, v := range v.Networks {
+			for _, e := range v.Endpoints {
+				for _, v := range e.IPAddresses {
+					// collect both ipv4 and ipv6 addresses
+					azureVnetPodIps[v.IP] = e.IfName
+				}
+			}
+		}
+	}
+	return azureVnetPodIps, nil
+}
+
+func azureVnetStateIpamIps(result []byte) (map[string]string, error) {
+	var azureVnetIpamResult AzureVnetIpam
+	err := json.Unmarshal(result, &azureVnetIpamResult)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to unmarshal azure vnet ipam")
+	}
+
+	azureVnetIpamPodIps := make(map[string]string)
+
+	for _, v := range azureVnetIpamResult.IPAM.AddrSpaces {
+		for _, v := range v.Pools {
+			for _, v := range v.Addresses {
+				if v.InUse {
+					azureVnetIpamPodIps[v.Addr.String()] = v.Addr.String()
+				}
+			}
+		}
+	}
+	return azureVnetIpamPodIps, nil
 }
