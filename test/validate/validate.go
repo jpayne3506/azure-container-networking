@@ -124,7 +124,7 @@ func (v *Validator) ValidateRestartNetwork(ctx context.Context) error {
 		// exec into the pod to get the state file
 		_, err = k8sutils.ExecCmdOnPod(ctx, v.clientset, privilegedNamespace, privelegedPod.Name, restartNetworkCmd, v.config)
 		if err != nil {
-			return errors.Wrapf(err, "failed to exec into privileged pod")
+			return errors.Wrapf(err, "failed to exec into privileged pod - %s", privelegedPod.Name)
 		}
 		err = k8sutils.WaitForPodsRunning(ctx, v.clientset, "", "")
 		if err != nil {
@@ -151,7 +151,7 @@ func (v *Validator) validateIPs(ctx context.Context, stateFileIps stateFileIpsFu
 		// exec into the pod to get the state file
 		result, err := k8sutils.ExecCmdOnPod(ctx, v.clientset, namespace, podName, cmd, v.config)
 		if err != nil {
-			return errors.Wrapf(err, "failed to exec into privileged pod")
+			return errors.Wrapf(err, "failed to exec into privileged pod - %s", podName)
 		}
 		filePodIps, err := stateFileIps(result)
 		if err != nil {
