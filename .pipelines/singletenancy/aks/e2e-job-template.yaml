@@ -29,6 +29,7 @@ stages:
           clusterType: ${{ parameters.clusterType }}
           clusterName: ${{ parameters.clusterName }}-$(commitID)
           vmSize: ${{ parameters.vmSize }}
+          vmSizeWin: ${{ parameters.vmSize }} # Matching linux vmSize
           k8sVersion: ${{ parameters.k8sVersion }}
           dependsOn: ${{ parameters.dependsOn }}
           region: $(REGION_AKS_CLUSTER_TEST)
@@ -39,13 +40,13 @@ stages:
       GOPATH: "$(Agent.TempDirectory)/go" # Go workspace path
       GOBIN: "$(GOPATH)/bin" # Go binaries path
       modulePath: "$(GOPATH)/src/github.com/Azure/azure-container-networking"
-      dropgzVersion: $[ stagedependencies.setup.env.outputs['EnvironmentalVariables.dropgzVersion'] ]
-      cniVersion: $[ stagedependencies.setup.env.outputs['EnvironmentalVariables.cniVersion'] ]
       commitID: $[ stagedependencies.setup.env.outputs['EnvironmentalVariables.commitID'] ]
     dependsOn:
     - setup
     - publish
     - ${{ parameters.clusterName }}
+    pool:
+      name: $(BUILD_POOL_NAME_DEFAULT)
     jobs:
       - job: ${{ parameters.name }}
         displayName: Singletenancy AKS - (${{ parameters.name }})
@@ -62,13 +63,11 @@ stages:
               arch: ${{ parameters.arch }}
               os: ${{ parameters.os }}
               os_version: ${{ parameters.os_version }}
-              version: $(dropgzVersion)
-              cniVersion: $(cniVersion)
               scaleup: ${{ parameters.scaleup }}
 
       - template: ../../cni/k8s-e2e/k8s-e2e-job-template.yaml
         parameters:
-          sub: $(AZURE_TEST_AGENT_SERVICE_CONNECTION)
+          sub: $(BUILD_VALIDATIONS_SERVICE_CONNECTION)
           clusterName: ${{ parameters.clusterName }}-$(commitID)
           os: ${{ parameters.os }}
           datapath: true
@@ -78,3 +77,16 @@ stages:
           service: true
           hostport: true
           dependsOn: ${{ parameters.name }}
+
+      - job: failedE2ELogs
+        displayName: "Failure Logs"
+        dependsOn:
+          - ${{ parameters.name }}
+          - cni_${{ parameters.os }}
+        condition: failed()
+        steps:
+          - template: ../../templates/log-template.yaml
+            parameters:
+              clusterName: ${{ parameters.clusterName }}-$(commitID)
+              os: ${{ parameters.os }}
+              cni: cniv1

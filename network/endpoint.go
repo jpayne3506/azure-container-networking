@@ -9,16 +9,20 @@ import (
 	"net"
 	"strings"
 
-	"github.com/Azure/azure-container-networking/log"
+	"github.com/Azure/azure-container-networking/cni/log"
+	"github.com/Azure/azure-container-networking/cns"
 	"github.com/Azure/azure-container-networking/netio"
 	"github.com/Azure/azure-container-networking/netlink"
 	"github.com/Azure/azure-container-networking/network/policy"
 	"github.com/Azure/azure-container-networking/platform"
+	"go.uber.org/zap"
 )
 
 const (
 	InfraVnet = 0
 )
+
+var logger = log.CNILogger.With(zap.String("component", "net"))
 
 type AzureHNSEndpoint struct{}
 
@@ -49,6 +53,8 @@ type endpoint struct {
 	PODNameSpace             string `json:",omitempty"`
 	InfraVnetAddressSpace    string `json:",omitempty"`
 	NetNs                    string `json:",omitempty"`
+	// SecondaryInterfaces is a map of interface name to InterfaceInfo
+	SecondaryInterfaces map[string]*InterfaceInfo
 }
 
 // EndpointInfo contains read-only information about an endpoint.
@@ -83,6 +89,10 @@ type EndpointInfo struct {
 	VnetCidrs                string
 	ServiceCidrs             string
 	NATInfo                  []policy.NATInfo
+	NICType                  cns.NICType
+	SkipDefaultRoutes        bool
+	HNSEndpointID            string
+	HostIfName               string
 }
 
 // RouteInfo contains information about an IP route.
@@ -95,6 +105,22 @@ type RouteInfo struct {
 	Scope    int
 	Priority int
 	Table    int
+}
+
+// InterfaceInfo contains information for secondary interfaces
+type InterfaceInfo struct {
+	Name              string
+	MacAddress        net.HardwareAddr
+	IPConfigs         []*IPConfig
+	Routes            []RouteInfo
+	DNS               DNSInfo
+	NICType           cns.NICType
+	SkipDefaultRoutes bool
+}
+
+type IPConfig struct {
+	Address net.IPNet
+	Gateway net.IP
 }
 
 type apipaClient interface {
@@ -114,57 +140,61 @@ func (nw *network) newEndpoint(
 	nl netlink.NetlinkInterface,
 	plc platform.ExecClient,
 	netioCli netio.NetIOInterface,
-	epInfo *EndpointInfo,
+	nsc NamespaceClientInterface,
+	iptc ipTablesClient,
+	epInfo []*EndpointInfo,
 ) (*endpoint, error) {
 	var ep *endpoint
 	var err error
 
 	defer func() {
 		if err != nil {
-			log.Printf("[net] Failed to create endpoint %v, err:%v.", epInfo.Id, err)
+			logger.Error("Failed to create endpoint with err", zap.String("id", epInfo[0].Id), zap.Error(err))
 		}
 	}()
 
 	// Call the platform implementation.
 	// Pass nil for epClient and will be initialized in newendpointImpl
-	ep, err = nw.newEndpointImpl(apipaCli, nl, plc, netioCli, nil, epInfo)
+	ep, err = nw.newEndpointImpl(apipaCli, nl, plc, netioCli, nil, nsc, iptc, epInfo)
 	if err != nil {
 		return nil, err
 	}
 
-	nw.Endpoints[epInfo.Id] = ep
-	log.Printf("[net] Created endpoint %+v. Num of endpoints:%d", ep, len(nw.Endpoints))
+	nw.Endpoints[ep.Id] = ep
+	logger.Info("Created endpoint. Num of endpoints", zap.Any("ep", ep), zap.Int("numEndpoints", len(nw.Endpoints)))
 	return ep, nil
 }
 
 // DeleteEndpoint deletes an existing endpoint from the network.
-func (nw *network) deleteEndpoint(nl netlink.NetlinkInterface, plc platform.ExecClient, endpointID string) error {
+func (nw *network) deleteEndpoint(nl netlink.NetlinkInterface, plc platform.ExecClient, nioc netio.NetIOInterface, nsc NamespaceClientInterface,
+	iptc ipTablesClient, endpointID string,
+) error {
 	var err error
 
-	log.Printf("[net] Deleting endpoint %v from network %v.", endpointID, nw.Id)
+	logger.Info("Deleting endpoint from network", zap.String("endpointID", endpointID), zap.String("id", nw.Id))
 	defer func() {
 		if err != nil {
-			log.Printf("[net] Failed to delete endpoint %v, err:%v.", endpointID, err)
+			logger.Error("Failed to delete endpoint with", zap.String("endpointID", endpointID), zap.Error(err))
 		}
 	}()
 
 	// Look up the endpoint.
 	ep, err := nw.getEndpoint(endpointID)
 	if err != nil {
-		log.Printf("[net] Endpoint %v not found. Not Returning error", endpointID)
+		logger.Error("Endpoint not found. Not Returning error", zap.String("endpointID", endpointID), zap.Error(err))
 		return nil
 	}
 
 	// Call the platform implementation.
 	// Pass nil for epClient and will be initialized in deleteEndpointImpl
-	err = nw.deleteEndpointImpl(nl, plc, nil, ep)
+	err = nw.deleteEndpointImpl(nl, plc, nil, nioc, nsc, iptc, ep)
 	if err != nil {
 		return err
 	}
 
 	// Remove the endpoint object.
 	delete(nw.Endpoints, endpointID)
-	log.Printf("[net] Deleted endpoint %+v. Num of endpoints:%d", ep, len(nw.Endpoints))
+	logger.Info("Deleted endpoint. Num of endpoints", zap.Any("ep", ep), zap.Int("numEndpoints", len(nw.Endpoints)))
 	return nil
 }
 
@@ -181,7 +211,7 @@ func (nw *network) getEndpoint(endpointId string) (*endpoint, error) {
 
 // GetEndpointByPOD returns the endpoint with the given ID.
 func (nw *network) getEndpointByPOD(podName string, podNameSpace string, doExactMatchForPodName bool) (*endpoint, error) {
-	log.Printf("Trying to retrieve endpoint for pod name: %v in namespace: %v", podName, podNameSpace)
+	logger.Info("Trying to retrieve endpoint for pod name in namespace", zap.String("podName", podName), zap.String("podNameSpace", podNameSpace))
 
 	var ep *endpoint
 
@@ -238,6 +268,8 @@ func (ep *endpoint) getInfo() *EndpointInfo {
 		PODName:                  ep.PODName,
 		PODNameSpace:             ep.PODNameSpace,
 		NetworkContainerID:       ep.NetworkContainerID,
+		HNSEndpointID:            ep.HnsId,
+		HostIfName:               ep.HostIfName,
 	}
 
 	info.Routes = append(info.Routes, ep.Routes...)
@@ -258,7 +290,7 @@ func (ep *endpoint) attach(sandboxKey string) error {
 
 	ep.SandboxKey = sandboxKey
 
-	log.Printf("[net] Attached endpoint %v to sandbox %v.", ep.Id, sandboxKey)
+	logger.Info("Attached endpoint to sandbox", zap.String("id", ep.Id), zap.String("sandboxKey", sandboxKey))
 
 	return nil
 }
@@ -269,7 +301,7 @@ func (ep *endpoint) detach() error {
 		return errEndpointNotInUse
 	}
 
-	log.Printf("[net] Detached endpoint %v from sandbox %v.", ep.Id, ep.SandboxKey)
+	logger.Info("Detached endpoint from sandbox", zap.String("id", ep.Id), zap.String("sandboxKey", ep.SandboxKey))
 
 	ep.SandboxKey = ""
 
@@ -280,21 +312,22 @@ func (ep *endpoint) detach() error {
 func (nm *networkManager) updateEndpoint(nw *network, exsitingEpInfo *EndpointInfo, targetEpInfo *EndpointInfo) error {
 	var err error
 
-	log.Printf("[net] Updating existing endpoint [%+v] in network %v to target [%+v].", exsitingEpInfo, nw.Id, targetEpInfo)
+	logger.Info("Updating existing endpoint in network to target", zap.Any("exsitingEpInfo", exsitingEpInfo),
+		zap.String("id", nw.Id), zap.Any("targetEpInfo", targetEpInfo))
 	defer func() {
 		if err != nil {
-			log.Printf("[net] Failed to update endpoint %v, err:%v.", exsitingEpInfo.Id, err)
+			logger.Error("Failed to update endpoint with err", zap.String("id", exsitingEpInfo.Id), zap.Error(err))
 		}
 	}()
 
-	log.Printf("Trying to retrieve endpoint id %v", exsitingEpInfo.Id)
+	logger.Info("Trying to retrieve endpoint id", zap.String("id", exsitingEpInfo.Id))
 
 	ep := nw.Endpoints[exsitingEpInfo.Id]
 	if ep == nil {
 		return errEndpointNotFound
 	}
 
-	log.Printf("[net] Retrieved endpoint to update %+v.", ep)
+	logger.Info("Retrieved endpoint to update", zap.Any("ep", ep))
 
 	// Call the platform implementation.
 	ep, err = nm.updateEndpointImpl(nw, exsitingEpInfo, targetEpInfo)
@@ -310,13 +343,21 @@ func (nm *networkManager) updateEndpoint(nw *network, exsitingEpInfo *EndpointIn
 
 func GetPodNameWithoutSuffix(podName string) string {
 	nameSplit := strings.Split(podName, "-")
-	log.Printf("namesplit %v", nameSplit)
+	logger.Info("namesplit", zap.Any("nameSplit", nameSplit))
 	if len(nameSplit) > 2 {
 		nameSplit = nameSplit[:len(nameSplit)-2]
 	} else {
 		return podName
 	}
 
-	log.Printf("Pod name after splitting based on - : %v", nameSplit)
+	logger.Info("Pod name after splitting based on", zap.Any("nameSplit", nameSplit))
 	return strings.Join(nameSplit, "-")
+}
+
+// IsEndpointStateInComplete returns true if both HNSEndpointID and HostVethName are missing.
+func (epInfo *EndpointInfo) IsEndpointStateIncomplete() bool {
+	if epInfo.HNSEndpointID == "" && epInfo.IfName == "" {
+		return true
+	}
+	return false
 }

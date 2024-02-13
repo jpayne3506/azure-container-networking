@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/Azure/azure-container-networking/cns/common"
@@ -34,6 +35,7 @@ const (
 	NmAgentSupportedApisPath      = "/network/nmagentsupportedapis"
 	V1Prefix                      = "/v0.1"
 	V2Prefix                      = "/v0.2"
+	EndpointPath                  = "/network/endpoints/"
 )
 
 // HTTPService describes the min API interface that every service should have.
@@ -48,6 +50,16 @@ type HTTPService interface {
 	GetPendingReleaseIPConfigs() []IPConfigurationStatus
 	GetPodIPConfigState() map[string]IPConfigurationStatus
 	MarkIPAsPendingRelease(numberToMark int) (map[string]IPConfigurationStatus, error)
+	AttachIPConfigsHandlerMiddleware(IPConfigsHandlerMiddleware)
+	MarkNIPsPendingRelease(n int) (map[string]IPConfigurationStatus, error)
+}
+
+// IPConfigsHandlerFunc
+type IPConfigsHandlerFunc func(context.Context, IPConfigsRequest) (*IPConfigsResponse, error)
+
+// IPConfigsHandlerMiddleware
+type IPConfigsHandlerMiddleware interface {
+	IPConfigsRequestHandlerWrapper(defaultHandler IPConfigsHandlerFunc, failureHandler IPConfigsHandlerFunc) IPConfigsHandlerFunc
 }
 
 // This is used for KubernetesCRD orchestrator Type where NC has multiple ips.
@@ -271,13 +283,13 @@ type NodeConfiguration struct {
 	NodeSubnet Subnet
 }
 
+// IpamPoolMonitorStateSnapshot struct to expose state values for IPAMPoolMonitor struct
 type IPAMPoolMonitor interface {
 	Start(ctx context.Context) error
 	Update(nnc *v1alpha.NodeNetworkConfig) error
 	GetStateSnapshot() IpamPoolMonitorStateSnapshot
 }
 
-// IpamPoolMonitorStateSnapshot struct to expose state values for IPAMPoolMonitor struct
 type IpamPoolMonitorStateSnapshot struct {
 	MinimumFreeIps           int64
 	MaximumFreeIps           int64
@@ -346,4 +358,42 @@ type HomeAzResponse struct {
 type GetHomeAzResponse struct {
 	Response       Response       `json:"response"`
 	HomeAzResponse HomeAzResponse `json:"homeAzResponse"`
+}
+
+// Used by EndpointHandler API to update endpoint state.
+type EndpointRequest struct {
+	HnsEndpointID string `json:"hnsEndpointID"`
+	HostVethName  string `json:"hostVethName"`
+}
+
+// GetEndpointResponse describes response from the The GetEndpoint API.
+type GetEndpointResponse struct {
+	Response     Response     `json:"response"`
+	EndpointInfo EndpointInfo `json:"endpointInfo"`
+}
+
+type EndpointInfo struct {
+	PodName       string
+	PodNamespace  string
+	IfnameToIPMap map[string]*IPInfo // key : interface name, value : IPInfo
+	HnsEndpointID string
+	HostVethName  string
+}
+type IPInfo struct {
+	IPv4 []net.IPNet
+	IPv6 []net.IPNet
+}
+
+type GetHTTPServiceDataResponse struct {
+	HTTPRestServiceData HTTPRestServiceData `json:"HTTPRestServiceData"`
+	Response            Response            `json:"response"`
+}
+
+// HTTPRestServiceData represents in-memory CNS data in the debug API paths.
+// PodInterfaceId is key and value is slice of Pod IP uuids in PodIPIDByPodInterfaceKey
+// secondaryipid(uuid) is key for PodIPConfigState
+type HTTPRestServiceData struct {
+	PodIPIDByPodInterfaceKey map[string][]string              `json:"podIPIDByPodInterfaceKey"`
+	PodIPConfigState         map[string]IPConfigurationStatus `json:"podIpConfigState"`
+	IPAMPoolMonitor          IpamPoolMonitorStateSnapshot     `json:"ipamPoolMonitor"`
 }

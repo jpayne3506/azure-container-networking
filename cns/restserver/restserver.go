@@ -30,10 +30,8 @@ import (
 // All helper/utility functions - util.go
 // Constants - const.go
 
-var (
-	// Named Lock for accessing different states in httpRestServiceState
-	namedLock = acn.InitNamedLock()
-)
+// Named Lock for accessing different states in httpRestServiceState
+var namedLock = acn.InitNamedLock()
 
 type interfaceGetter interface {
 	GetInterfaces(ctx context.Context) (*wireserver.GetInterfacesResult, error)
@@ -69,11 +67,12 @@ type HTTPRestService struct {
 	state                    *httpRestServiceState
 	podsPendingIPAssignment  *bounded.TimedSet
 	sync.RWMutex
-	dncPartitionKey         string
-	EndpointState           map[string]*EndpointInfo // key : container id
-	EndpointStateStore      store.KeyValueStore
-	cniConflistGenerator    CNIConflistGenerator
-	generateCNIConflistOnce sync.Once
+	dncPartitionKey            string
+	EndpointState              map[string]*EndpointInfo // key : container id
+	EndpointStateStore         store.KeyValueStore
+	cniConflistGenerator       CNIConflistGenerator
+	generateCNIConflistOnce    sync.Once
+	IPConfigsHandlerMiddleware cns.IPConfigsHandlerMiddleware
 }
 
 type CNIConflistGenerator interface {
@@ -95,6 +94,8 @@ type EndpointInfo struct {
 	PodName       string
 	PodNamespace  string
 	IfnameToIPMap map[string]*IPInfo // key : interface name, value : IPInfo
+	HnsEndpointID string
+	HostVethName  string
 }
 
 type IPInfo struct {
@@ -102,21 +103,15 @@ type IPInfo struct {
 	IPv6 []net.IPNet
 }
 
-type GetHTTPServiceDataResponse struct {
-	HTTPRestServiceData HTTPRestServiceData
-	Response            Response
-}
-
-// HTTPRestServiceData represents in-memory CNS data in the debug API paths.
-type HTTPRestServiceData struct {
-	PodIPIDByPodInterfaceKey map[string][]string                  // PodInterfaceId is key and value is slice of Pod IP uuids.
-	PodIPConfigState         map[string]cns.IPConfigurationStatus // secondaryipid(uuid) is key
-	IPAMPoolMonitor          cns.IpamPoolMonitorStateSnapshot
-}
-
 type Response struct {
 	ReturnCode types.ResponseCode
 	Message    string
+}
+
+// GetEndpointResponse describes response from the The GetEndpoint API.
+type GetEndpointResponse struct {
+	Response     Response     `json:"response"`
+	EndpointInfo EndpointInfo `json:"endpointInfo"`
 }
 
 // containerstatus is used to save status of an existing container
@@ -141,6 +136,7 @@ type httpRestServiceState struct {
 	TimeStamp                        time.Time
 	joinedNetworks                   map[string]struct{}
 	primaryInterface                 *wireserver.InterfaceInfo
+	secondaryInterface               *wireserver.InterfaceInfo
 }
 
 type networkInfo struct {
@@ -264,7 +260,7 @@ func (service *HTTPRestService) Init(config *common.ServiceConfig) error {
 	listener.AddHandler(cns.PathDebugRestData, service.handleDebugRestData)
 	listener.AddHandler(cns.NetworkContainersURLPath, service.getOrRefreshNetworkContainers)
 	listener.AddHandler(cns.GetHomeAz, service.getHomeAz)
-
+	listener.AddHandler(cns.EndpointPath, service.EndpointHandlerAPI)
 	// handlers for v0.2
 	listener.AddHandler(cns.V2Prefix+cns.SetEnvironmentPath, service.setEnvironment)
 	listener.AddHandler(cns.V2Prefix+cns.CreateNetworkPath, service.createNetwork)
@@ -289,6 +285,7 @@ func (service *HTTPRestService) Init(config *common.ServiceConfig) error {
 	listener.AddHandler(cns.V2Prefix+cns.DeleteHostNCApipaEndpointPath, service.deleteHostNCApipaEndpoint)
 	listener.AddHandler(cns.V2Prefix+cns.NmAgentSupportedApisPath, service.nmAgentSupportedApisHandler)
 	listener.AddHandler(cns.V2Prefix+cns.GetHomeAz, service.getHomeAz)
+	listener.AddHandler(cns.V2Prefix+cns.EndpointPath, service.EndpointHandlerAPI)
 
 	// Initialize HTTP client to be reused in CNS
 	connectionTimeout, _ := service.GetOption(acn.OptHttpConnectionTimeout).(int)
@@ -348,4 +345,8 @@ func (service *HTTPRestService) MustGenerateCNIConflistOnce() {
 			panic("unable to close the cni conflist output stream: " + err.Error())
 		}
 	})
+}
+
+func (service *HTTPRestService) AttachIPConfigsHandlerMiddleware(middleware cns.IPConfigsHandlerMiddleware) {
+	service.IPConfigsHandlerMiddleware = middleware
 }

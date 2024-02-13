@@ -1,7 +1,6 @@
 parameters:
   name: ""
   displayName: ""
-  testDropgz: ""
   clusterType: ""
   clusterName: ""
   vmSize: ""
@@ -31,6 +30,7 @@ stages:
           region: $(REGION_DUALSTACKOVERLAY_CLUSTER_TEST) # Dualstack has a specific region requirement
 
   - stage: ${{ parameters.name }}
+    condition: and( succeeded(), not(eq(dependencies.dualstackoverlaye2e.result,'SucceededWithIssues')) ) # Cant use parameters in dependencies
     displayName: E2E - ${{ parameters.displayName }}
     dependsOn:
     - setup
@@ -41,9 +41,11 @@ stages:
       GOBIN: "$(GOPATH)/bin" # Go binaries path
       modulePath: "$(GOPATH)/src/github.com/Azure/azure-container-networking"
       commitID: $[ stagedependencies.setup.env.outputs['EnvironmentalVariables.commitID'] ]
+    pool:
+      name: $(BUILD_POOL_NAME_DEFAULT)
     jobs:
-      - job: ${{ parameters.name }}
-        displayName: DualStack Overlay Test Suite - (${{ parameters.name }})
+      - job: ${{ parameters.name }}_linux
+        displayName: DualStack Overlay Test Suite | Linux - (${{ parameters.name }})
         pool:
           name: $(BUILD_POOL_NAME_DEFAULT)
           demands:
@@ -53,17 +55,72 @@ stages:
           - template: dualstackoverlay-e2e-step-template.yaml
             parameters:
               name: ${{ parameters.name }}
-              testDropgz: ${{ parameters.testDropgz }}
               clusterName: ${{ parameters.clusterName }}-$(commitID)
+              os: linux
+
+      - job: ${{ parameters.name }}_windows
+        displayName: DualStack Overlay Test Suite | Windows - (${{ parameters.name }})
+        dependsOn: ${{ parameters.name }}_linux
+        pool:
+          name: $(BUILD_POOL_NAME_DEFAULT)
+          demands:
+          - agent.os -equals Linux
+          - Role -equals $(CUSTOM_E2E_ROLE)
+        steps:
+          - template: dualstackoverlay-e2e-step-template.yaml
+            parameters:
+              name: ${{ parameters.name }}
+              clusterName: ${{ parameters.clusterName }}-$(commitID)
+              os: windows
+              vmSizeWin: ${{ parameters.vmSize }} # Matching linux vmSize
 
       - template: ../../cni/k8s-e2e/k8s-e2e-job-template.yaml
         parameters:
-          sub: $(AZURE_TEST_AGENT_SERVICE_CONNECTION)
+          sub: $(BUILD_VALIDATIONS_SERVICE_CONNECTION)
           clusterName: ${{ parameters.clusterName }}-$(commitID)
-          os: ${{ parameters.os }}
-          dependsOn: ${{ parameters.name }}
+          os: linux
+          dependsOn: ${{ parameters.name }}_windows
           dualstack: true
           dns: true
           portforward: true
           hostport: true
           service: true
+
+      - template: ../../cni/k8s-e2e/k8s-e2e-job-template.yaml
+        parameters:
+          sub: $(BUILD_VALIDATIONS_SERVICE_CONNECTION)
+          clusterName: ${{ parameters.clusterName }}-$(commitID)
+          os: windows
+          dependsOn: cni_linux
+          dualstack: true
+          dns: true
+          portforward: true
+          service: true
+          hostport: true
+          hybridWin: true
+
+      - job: failedE2ELogs_linux
+        displayName: "Linux Failure Logs"
+        dependsOn:
+          - ${{ parameters.name }}_linux
+          - cni_linux
+        condition: in(dependencies.${{ parameters.name }}_linux.result, 'Failed')
+        steps:
+          - template: ../../templates/log-template.yaml
+            parameters:
+              clusterName: ${{ parameters.clusterName }}-$(commitID)
+              os: linux
+              cni: cniv2
+
+      - job: failedE2ELogs_windows
+        displayName: "Windows Failure Logs"
+        dependsOn:
+          - ${{ parameters.name }}_windows
+          - cni_windows
+        condition: in(dependencies.${{ parameters.name }}_windows.result, 'Failed')
+        steps:
+          - template: ../../templates/log-template.yaml
+            parameters:
+              clusterName: ${{ parameters.clusterName }}-$(commitID)
+              os: windows
+              cni: cniv2

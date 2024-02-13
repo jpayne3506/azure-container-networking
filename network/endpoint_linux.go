@@ -10,12 +10,13 @@ import (
 	"net"
 	"strings"
 
-	"github.com/Azure/azure-container-networking/log"
+	"github.com/Azure/azure-container-networking/cns"
 	"github.com/Azure/azure-container-networking/netio"
 	"github.com/Azure/azure-container-networking/netlink"
 	"github.com/Azure/azure-container-networking/network/networkutils"
 	"github.com/Azure/azure-container-networking/ovsctl"
 	"github.com/Azure/azure-container-networking/platform"
+	"go.uber.org/zap"
 )
 
 const (
@@ -38,7 +39,7 @@ func ConstructEndpointID(containerID string, _ string, ifName string) (string, s
 	if len(containerID) > 8 {
 		containerID = containerID[:8]
 	} else {
-		log.Printf("Container ID is not greater than 8 ID: %v", containerID)
+		logger.Info("Container ID is not greater than 8 ID", zap.String("containerID", containerID))
 		return "", ""
 	}
 
@@ -53,210 +54,212 @@ func (nw *network) newEndpointImpl(
 	nl netlink.NetlinkInterface,
 	plc platform.ExecClient,
 	netioCli netio.NetIOInterface,
-	epClient EndpointClient,
-	epInfo *EndpointInfo,
+	testEpClient EndpointClient,
+	nsc NamespaceClientInterface,
+	iptc ipTablesClient,
+	epInfo []*EndpointInfo,
 ) (*endpoint, error) {
-	var containerIf *net.Interface
-	var ns *Namespace
-	var ep *endpoint
-	var err error
-	var hostIfName string
-	var contIfName string
-	var localIP string
-	var vlanid int = 0
+	var (
+		err           error
+		hostIfName    string
+		contIfName    string
+		localIP       string
+		vlanid        = 0
+		defaultEpInfo = epInfo[0]
+		containerIf   *net.Interface
+	)
 
-	if nw.Endpoints[epInfo.Id] != nil {
-		log.Printf("[net] Endpoint alreday exists.")
+	if nw.Endpoints[defaultEpInfo.Id] != nil {
+		logger.Info("[net] Endpoint already exists.")
 		err = errEndpointExists
 		return nil, err
 	}
 
-	if epInfo.Data != nil {
-		if _, ok := epInfo.Data[VlanIDKey]; ok {
-			vlanid = epInfo.Data[VlanIDKey].(int)
+	if defaultEpInfo.Data != nil {
+		if _, ok := defaultEpInfo.Data[VlanIDKey]; ok {
+			vlanid = defaultEpInfo.Data[VlanIDKey].(int)
 		}
 
-		if _, ok := epInfo.Data[LocalIPKey]; ok {
-			localIP = epInfo.Data[LocalIPKey].(string)
+		if _, ok := defaultEpInfo.Data[LocalIPKey]; ok {
+			localIP = defaultEpInfo.Data[LocalIPKey].(string)
 		}
 	}
 
-	if _, ok := epInfo.Data[OptVethName]; ok {
-		key := epInfo.Data[OptVethName].(string)
-		log.Printf("Generate veth name based on the key provided %v", key)
+	if _, ok := defaultEpInfo.Data[OptVethName]; ok {
+		key := defaultEpInfo.Data[OptVethName].(string)
+		logger.Info("Generate veth name based on the key provided", zap.String("key", key))
 		vethname := generateVethName(key)
 		hostIfName = fmt.Sprintf("%s%s", hostVEthInterfacePrefix, vethname)
 		contIfName = fmt.Sprintf("%s%s2", hostVEthInterfacePrefix, vethname)
 	} else {
 		// Create a veth pair.
-		log.Printf("Generate veth name based on endpoint id")
-		hostIfName = fmt.Sprintf("%s%s", hostVEthInterfacePrefix, epInfo.Id[:7])
-		contIfName = fmt.Sprintf("%s%s-2", hostVEthInterfacePrefix, epInfo.Id[:7])
+		logger.Info("Generate veth name based on endpoint id")
+		hostIfName = fmt.Sprintf("%s%s", hostVEthInterfacePrefix, defaultEpInfo.Id[:7])
+		contIfName = fmt.Sprintf("%s%s-2", hostVEthInterfacePrefix, defaultEpInfo.Id[:7])
 	}
 
-	// epClient is non-nil only when the endpoint is created for the unit test.
-	if epClient == nil {
-		//nolint:gocritic
-		if vlanid != 0 {
-			if nw.Mode == opModeTransparentVlan {
-				log.Printf("Transparent vlan client")
-				if _, ok := epInfo.Data[SnatBridgeIPKey]; ok {
-					nw.SnatBridgeIP = epInfo.Data[SnatBridgeIPKey].(string)
-				}
-				epClient = NewTransparentVlanEndpointClient(nw, epInfo, hostIfName, contIfName, vlanid, localIP, nl, plc)
-			} else {
-				log.Printf("OVS client")
-				if _, ok := epInfo.Data[SnatBridgeIPKey]; ok {
-					nw.SnatBridgeIP = epInfo.Data[SnatBridgeIPKey].(string)
-				}
-
-				epClient = NewOVSEndpointClient(
-					nw,
-					epInfo,
-					hostIfName,
-					contIfName,
-					vlanid,
-					localIP,
-					nl,
-					ovsctl.NewOvsctl(),
-					plc)
-			}
-		} else if nw.Mode != opModeTransparent {
-			log.Printf("Bridge client")
-			epClient = NewLinuxBridgeEndpointClient(nw.extIf, hostIfName, contIfName, nw.Mode, nl, plc)
-		} else {
-			log.Printf("Transparent client")
-			epClient = NewTransparentEndpointClient(nw.extIf, hostIfName, contIfName, nw.Mode, nl, plc)
-		}
-	}
-
-	// Cleanup on failure.
-	defer func() {
-		if err != nil {
-			log.Printf("CNI error:%v. Delete Endpoint %v and rules that are created.", err, contIfName)
-			endpt := &endpoint{
-				Id:                       epInfo.Id,
-				IfName:                   contIfName,
-				HostIfName:               hostIfName,
-				LocalIP:                  localIP,
-				IPAddresses:              epInfo.IPAddresses,
-				DNS:                      epInfo.DNS,
-				VlanID:                   vlanid,
-				EnableSnatOnHost:         epInfo.EnableSnatOnHost,
-				EnableMultitenancy:       epInfo.EnableMultiTenancy,
-				AllowInboundFromHostToNC: epInfo.AllowInboundFromHostToNC,
-				AllowInboundFromNCToHost: epInfo.AllowInboundFromNCToHost,
-			}
-
-			if containerIf != nil {
-				endpt.MacAddress = containerIf.HardwareAddr
-				epClient.DeleteEndpointRules(endpt)
-			}
-
-			if nw.extIf != nil {
-				endpt.Gateways = []net.IP{nw.extIf.IPv4Gateway}
-			}
-			// set deleteHostVeth to true to cleanup host veth interface if created
-			//nolint:errcheck // ignore error
-			epClient.DeleteEndpoints(endpt)
-		}
-	}()
-
-	if err = epClient.AddEndpoints(epInfo); err != nil {
-		return nil, err
-	}
-
-	containerIf, err = netioCli.GetNetworkInterfaceByName(contIfName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Setup rules for IP addresses on the container interface.
-	if err = epClient.AddEndpointRules(epInfo); err != nil {
-		return nil, err
-	}
-
-	// If a network namespace for the container interface is specified...
-	if epInfo.NetNsPath != "" {
-		// Open the network namespace.
-		log.Printf("[net] Opening netns %v.", epInfo.NetNsPath)
-		ns, err = OpenNamespace(epInfo.NetNsPath)
-		if err != nil {
-			return nil, err
-		}
-		defer ns.Close()
-
-		if err := epClient.MoveEndpointsToContainerNS(epInfo, ns.GetFd()); err != nil {
-			return nil, err
-		}
-
-		// Enter the container network namespace.
-		log.Printf("[net] Entering netns %v.", epInfo.NetNsPath)
-		if err = ns.Enter(); err != nil {
-			return nil, err
-		}
-
-		// Return to host network namespace.
-		defer func() {
-			log.Printf("[net] Exiting netns %v.", epInfo.NetNsPath)
-			if err := ns.Exit(); err != nil {
-				log.Printf("[net] Failed to exit netns, err:%v.", err)
-			}
-		}()
-	}
-
-	if epInfo.IPV6Mode != "" {
-		// Enable ipv6 setting in container
-		log.Printf("Enable ipv6 setting in container.")
-		nuc := networkutils.NewNetworkUtils(nl, plc)
-		if err = nuc.UpdateIPV6Setting(0); err != nil {
-			return nil, fmt.Errorf("Enable ipv6 in container failed:%w", err)
-		}
-	}
-
-	// If a name for the container interface is specified...
-	if epInfo.IfName != "" {
-		if err = epClient.SetupContainerInterfaces(epInfo); err != nil {
-			return nil, err
-		}
-	}
-
-	if err = epClient.ConfigureContainerInterfacesAndRoutes(epInfo); err != nil {
-		return nil, err
-	}
-
-	// Create the endpoint object.
-	ep = &endpoint{
-		Id:                       epInfo.Id,
+	ep := &endpoint{
+		Id:                       defaultEpInfo.Id,
 		IfName:                   contIfName, // container veth pair name. In cnm, we won't rename this and docker expects veth name.
 		HostIfName:               hostIfName,
-		MacAddress:               containerIf.HardwareAddr,
-		InfraVnetIP:              epInfo.InfraVnetIP,
+		InfraVnetIP:              defaultEpInfo.InfraVnetIP,
 		LocalIP:                  localIP,
-		IPAddresses:              epInfo.IPAddresses,
-		DNS:                      epInfo.DNS,
+		IPAddresses:              defaultEpInfo.IPAddresses,
+		DNS:                      defaultEpInfo.DNS,
 		VlanID:                   vlanid,
-		EnableSnatOnHost:         epInfo.EnableSnatOnHost,
-		EnableInfraVnet:          epInfo.EnableInfraVnet,
-		EnableMultitenancy:       epInfo.EnableMultiTenancy,
-		AllowInboundFromHostToNC: epInfo.AllowInboundFromHostToNC,
-		AllowInboundFromNCToHost: epInfo.AllowInboundFromNCToHost,
-		NetworkNameSpace:         epInfo.NetNsPath,
-		ContainerID:              epInfo.ContainerID,
-		PODName:                  epInfo.PODName,
-		PODNameSpace:             epInfo.PODNameSpace,
+		EnableSnatOnHost:         defaultEpInfo.EnableSnatOnHost,
+		EnableInfraVnet:          defaultEpInfo.EnableInfraVnet,
+		EnableMultitenancy:       defaultEpInfo.EnableMultiTenancy,
+		AllowInboundFromHostToNC: defaultEpInfo.AllowInboundFromHostToNC,
+		AllowInboundFromNCToHost: defaultEpInfo.AllowInboundFromNCToHost,
+		NetworkNameSpace:         defaultEpInfo.NetNsPath,
+		ContainerID:              defaultEpInfo.ContainerID,
+		PODName:                  defaultEpInfo.PODName,
+		PODNameSpace:             defaultEpInfo.PODNameSpace,
+		Routes:                   defaultEpInfo.Routes,
+		SecondaryInterfaces:      make(map[string]*InterfaceInfo),
 	}
-
 	if nw.extIf != nil {
 		ep.Gateways = []net.IP{nw.extIf.IPv4Gateway}
 	}
 
-	ep.Routes = append(ep.Routes, epInfo.Routes...)
+	for _, epInfo := range epInfo {
+		// testEpClient is non-nil only when the endpoint is created for the unit test
+		// resetting epClient to testEpClient in loop to use the test endpoint client if specified
+		epClient := testEpClient
+		if epClient == nil {
+			//nolint:gocritic
+			if vlanid != 0 {
+				if nw.Mode == opModeTransparentVlan {
+					logger.Info("Transparent vlan client")
+					if _, ok := epInfo.Data[SnatBridgeIPKey]; ok {
+						nw.SnatBridgeIP = epInfo.Data[SnatBridgeIPKey].(string)
+					}
+					epClient = NewTransparentVlanEndpointClient(nw, epInfo, hostIfName, contIfName, vlanid, localIP, nl, plc, nsc, iptc)
+				} else {
+					logger.Info("OVS client")
+					if _, ok := epInfo.Data[SnatBridgeIPKey]; ok {
+						nw.SnatBridgeIP = epInfo.Data[SnatBridgeIPKey].(string)
+					}
+
+					epClient = NewOVSEndpointClient(
+						nw,
+						epInfo,
+						hostIfName,
+						contIfName,
+						vlanid,
+						localIP,
+						nl,
+						ovsctl.NewOvsctl(),
+						plc,
+						iptc)
+				}
+			} else if nw.Mode != opModeTransparent {
+				logger.Info("Bridge client")
+				epClient = NewLinuxBridgeEndpointClient(nw.extIf, hostIfName, contIfName, nw.Mode, nl, plc)
+			} else if epInfo.NICType == cns.DelegatedVMNIC {
+				logger.Info("Secondary client")
+				epClient = NewSecondaryEndpointClient(nl, netioCli, plc, nsc, ep)
+			} else {
+				logger.Info("Transparent client")
+				epClient = NewTransparentEndpointClient(nw.extIf, hostIfName, contIfName, nw.Mode, nl, netioCli, plc)
+			}
+		}
+
+		//nolint:gocritic
+		defer func(client EndpointClient, contIfName string) {
+			// Cleanup on failure.
+			if err != nil {
+				logger.Error("CNI error. Delete Endpoint and rules that are created", zap.Error(err), zap.String("contIfName", contIfName))
+				if containerIf != nil {
+					client.DeleteEndpointRules(ep)
+				}
+				// set deleteHostVeth to true to cleanup host veth interface if created
+				//nolint:errcheck // ignore error
+				client.DeleteEndpoints(ep)
+			}
+		}(epClient, contIfName)
+
+		// wrapping endpoint client commands in anonymous func so that namespace can be exit and closed before the next loop
+		//nolint:wrapcheck // ignore wrap check
+		err = func() error {
+			if epErr := epClient.AddEndpoints(epInfo); epErr != nil {
+				return epErr
+			}
+
+			if epInfo.NICType == cns.InfraNIC {
+				var epErr error
+				containerIf, epErr = netioCli.GetNetworkInterfaceByName(contIfName)
+				if epErr != nil {
+					return epErr
+				}
+				ep.MacAddress = containerIf.HardwareAddr
+			}
+
+			// Setup rules for IP addresses on the container interface.
+			if epErr := epClient.AddEndpointRules(epInfo); epErr != nil {
+				return epErr
+			}
+
+			// If a network namespace for the container interface is specified...
+			if epInfo.NetNsPath != "" {
+				// Open the network namespace.
+				logger.Info("Opening netns", zap.Any("NetNsPath", epInfo.NetNsPath))
+				ns, epErr := nsc.OpenNamespace(epInfo.NetNsPath)
+				if epErr != nil {
+					return epErr
+				}
+				defer ns.Close()
+
+				if epErr := epClient.MoveEndpointsToContainerNS(epInfo, ns.GetFd()); epErr != nil {
+					return epErr
+				}
+
+				// Enter the container network namespace.
+				logger.Info("Entering netns", zap.Any("NetNsPath", epInfo.NetNsPath))
+				if epErr := ns.Enter(); epErr != nil {
+					return epErr
+				}
+
+				// Return to host network namespace.
+				defer func() {
+					logger.Info("Exiting netns", zap.Any("NetNsPath", epInfo.NetNsPath))
+					if epErr := ns.Exit(); epErr != nil {
+						logger.Error("Failed to exit netns with", zap.Error(epErr))
+					}
+				}()
+			}
+
+			if epInfo.IPV6Mode != "" {
+				// Enable ipv6 setting in container
+				logger.Info("Enable ipv6 setting in container.")
+				nuc := networkutils.NewNetworkUtils(nl, plc)
+				if epErr := nuc.UpdateIPV6Setting(0); epErr != nil {
+					return fmt.Errorf("Enable ipv6 in container failed:%w", epErr)
+				}
+			}
+
+			// If a name for the container interface is specified...
+			if epInfo.IfName != "" {
+				if epErr := epClient.SetupContainerInterfaces(epInfo); epErr != nil {
+					return epErr
+				}
+			}
+
+			return epClient.ConfigureContainerInterfacesAndRoutes(epInfo)
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return ep, nil
 }
 
 // deleteEndpointImpl deletes an existing endpoint from the network.
-func (nw *network) deleteEndpointImpl(nl netlink.NetlinkInterface, plc platform.ExecClient, epClient EndpointClient, ep *endpoint) error {
+func (nw *network) deleteEndpointImpl(nl netlink.NetlinkInterface, plc platform.ExecClient, epClient EndpointClient, nioc netio.NetIOInterface, nsc NamespaceClientInterface,
+	iptc ipTablesClient, ep *endpoint,
+) error {
 	// Delete the veth pair by deleting one of the peer interfaces.
 	// Deleting the host interface is more convenient since it does not require
 	// entering the container netns and hence works both for CNI and CNM.
@@ -267,16 +270,23 @@ func (nw *network) deleteEndpointImpl(nl netlink.NetlinkInterface, plc platform.
 		if ep.VlanID != 0 {
 			epInfo := ep.getInfo()
 			if nw.Mode == opModeTransparentVlan {
-				log.Printf("Transparent vlan client")
-				epClient = NewTransparentVlanEndpointClient(nw, epInfo, ep.HostIfName, "", ep.VlanID, ep.LocalIP, nl, plc)
+				logger.Info("Transparent vlan client")
+				epClient = NewTransparentVlanEndpointClient(nw, epInfo, ep.HostIfName, "", ep.VlanID, ep.LocalIP, nl, plc, nsc, iptc)
 
 			} else {
-				epClient = NewOVSEndpointClient(nw, epInfo, ep.HostIfName, "", ep.VlanID, ep.LocalIP, nl, ovsctl.NewOvsctl(), plc)
+				epClient = NewOVSEndpointClient(nw, epInfo, ep.HostIfName, "", ep.VlanID, ep.LocalIP, nl, ovsctl.NewOvsctl(), plc, iptc)
 			}
 		} else if nw.Mode != opModeTransparent {
 			epClient = NewLinuxBridgeEndpointClient(nw.extIf, ep.HostIfName, "", nw.Mode, nl, plc)
 		} else {
-			epClient = NewTransparentEndpointClient(nw.extIf, ep.HostIfName, "", nw.Mode, nl, plc)
+			if len(ep.SecondaryInterfaces) > 0 {
+				epClient = NewSecondaryEndpointClient(nl, nioc, plc, nsc, ep)
+				epClient.DeleteEndpointRules(ep)
+				//nolint:errcheck // ignore error
+				epClient.DeleteEndpoints(ep)
+			}
+
+			epClient = NewTransparentEndpointClient(nw.extIf, ep.HostIfName, "", nw.Mode, nl, nioc, plc)
 		}
 	}
 
@@ -303,7 +313,7 @@ func addRoutes(nl netlink.NetlinkInterface, netioshim netio.NetIOInterface, inte
 		} else {
 			interfaceIf, err := netioshim.GetNetworkInterfaceByName(interfaceName)
 			if err != nil {
-				log.Errorf("Interface not found:%v", err)
+				logger.Error("Interface not found with", zap.Error(err))
 				return fmt.Errorf("addRoutes failed: %w", err)
 			}
 			ifIndex = interfaceIf.Index
@@ -325,12 +335,12 @@ func addRoutes(nl netlink.NetlinkInterface, netioshim netio.NetIOInterface, inte
 			Table:     route.Table,
 		}
 
-		log.Printf("[net] Adding IP route %+v to link %v.", route, interfaceName)
+		logger.Info("Adding IP route to link", zap.Any("route", route), zap.String("interfaceName", interfaceName))
 		if err := nl.AddIPRoute(nlRoute); err != nil {
 			if !strings.Contains(strings.ToLower(err.Error()), "file exists") {
 				return err
 			} else {
-				log.Printf("[net] route already exists")
+				logger.Info("route already exists")
 			}
 		}
 	}
@@ -345,7 +355,7 @@ func deleteRoutes(nl netlink.NetlinkInterface, netioshim netio.NetIOInterface, i
 		if route.DevName != "" {
 			devIf, _ := netioshim.GetNetworkInterfaceByName(route.DevName)
 			if devIf == nil {
-				log.Printf("[net] Not deleting route. Interface %v doesn't exist", interfaceName)
+				logger.Info("Not deleting route. Interface doesn't exist", zap.String("interfaceName", interfaceName))
 				continue
 			}
 
@@ -353,7 +363,7 @@ func deleteRoutes(nl netlink.NetlinkInterface, netioshim netio.NetIOInterface, i
 		} else if interfaceName != "" {
 			interfaceIf, _ := netioshim.GetNetworkInterfaceByName(interfaceName)
 			if interfaceIf == nil {
-				log.Printf("[net] Not deleting route. Interface %v doesn't exist", interfaceName)
+				logger.Info("Not deleting route. Interface doesn't exist", zap.String("interfaceName", interfaceName))
 				continue
 			}
 			ifIndex = interfaceIf.Index
@@ -373,7 +383,7 @@ func deleteRoutes(nl netlink.NetlinkInterface, netioshim netio.NetIOInterface, i
 			Scope:     route.Scope,
 		}
 
-		log.Printf("[net] Deleting IP route %+v from link %v.", route, interfaceName)
+		logger.Info("Deleting IP route from link", zap.Any("route", route), zap.String("interfaceName", interfaceName))
 		if err := nl.DeleteIPRoute(nlRoute); err != nil {
 			return err
 		}
@@ -384,50 +394,47 @@ func deleteRoutes(nl netlink.NetlinkInterface, netioshim netio.NetIOInterface, i
 
 // updateEndpointImpl updates an existing endpoint in the network.
 func (nm *networkManager) updateEndpointImpl(nw *network, existingEpInfo *EndpointInfo, targetEpInfo *EndpointInfo) (*endpoint, error) {
-	var ns *Namespace
 	var ep *endpoint
-	var err error
 
 	existingEpFromRepository := nw.Endpoints[existingEpInfo.Id]
-	log.Printf("[updateEndpointImpl] Going to retrieve endpoint with Id %+v to update.", existingEpInfo.Id)
+	logger.Info("[updateEndpointImpl] Going to retrieve endpoint with Id to update", zap.String("id", existingEpInfo.Id))
 	if existingEpFromRepository == nil {
-		log.Printf("[updateEndpointImpl] Endpoint cannot be updated as it does not exist.")
-		err = errEndpointNotFound
-		return nil, err
+		logger.Info("[updateEndpointImpl] Endpoint cannot be updated as it does not exist")
+		return nil, errEndpointNotFound
 	}
 
 	netns := existingEpFromRepository.NetworkNameSpace
 	// Network namespace for the container interface has to be specified
 	if netns != "" {
 		// Open the network namespace.
-		log.Printf("[updateEndpointImpl] Opening netns %v.", netns)
-		ns, err = OpenNamespace(netns)
+		logger.Info("[updateEndpointImpl] Opening netns", zap.Any("netns", netns))
+		ns, err := nm.nsClient.OpenNamespace(netns)
 		if err != nil {
 			return nil, err
 		}
 		defer ns.Close()
 
 		// Enter the container network namespace.
-		log.Printf("[updateEndpointImpl] Entering netns %v.", netns)
+		logger.Info("[updateEndpointImpl] Entering netns", zap.Any("netns", netns))
 		if err = ns.Enter(); err != nil {
 			return nil, err
 		}
 
 		// Return to host network namespace.
 		defer func() {
-			log.Printf("[updateEndpointImpl] Exiting netns %v.", netns)
+			logger.Info("[updateEndpointImpl] Exiting netns", zap.Any("netns", netns))
 			if err := ns.Exit(); err != nil {
-				log.Printf("[updateEndpointImpl] Failed to exit netns, err:%v.", err)
+				logger.Error("[updateEndpointImpl] Failed to exit netns with", zap.Error(err))
 			}
 		}()
 	} else {
-		log.Printf("[updateEndpointImpl] Endpoint cannot be updated as the network namespace does not exist: Epid: %v", existingEpInfo.Id)
-		err = errNamespaceNotFound
-		return nil, err
+		logger.Info("[updateEndpointImpl] Endpoint cannot be updated as the network namespace does not exist: Epid", zap.String("id", existingEpInfo.Id),
+			zap.String("component", "updateEndpointImpl"))
+		return nil, errNamespaceNotFound
 	}
 
-	log.Printf("[updateEndpointImpl] Going to update routes in netns %v.", netns)
-	if err = nm.updateRoutes(existingEpInfo, targetEpInfo); err != nil {
+	logger.Info("[updateEndpointImpl] Going to update routes in netns", zap.Any("netns", netns))
+	if err := nm.updateRoutes(existingEpInfo, targetEpInfo); err != nil {
 		return nil, err
 	}
 
@@ -443,8 +450,8 @@ func (nm *networkManager) updateEndpointImpl(nw *network, existingEpInfo *Endpoi
 }
 
 func (nm *networkManager) updateRoutes(existingEp *EndpointInfo, targetEp *EndpointInfo) error {
-	log.Printf("Updating routes for the endpoint %+v.", existingEp)
-	log.Printf("Target endpoint is %+v", targetEp)
+	logger.Info("Updating routes for the endpoint", zap.Any("existingEp", existingEp))
+	logger.Info("Target endpoint is", zap.Any("targetEp", targetEp))
 
 	existingRoutes := make(map[string]RouteInfo)
 	targetRoutes := make(map[string]RouteInfo)
@@ -455,8 +462,8 @@ func (nm *networkManager) updateRoutes(existingEp *EndpointInfo, targetEp *Endpo
 	// we do not support enable/disable snat for now
 	defaultDst := net.ParseIP("0.0.0.0")
 
-	log.Printf("Going to collect routes and skip default and infravnet routes if applicable.")
-	log.Printf("Key for default route: %+v", defaultDst.String())
+	logger.Info("Going to collect routes and skip default and infravnet routes if applicable.")
+	logger.Info("Key for default route", zap.String("route", defaultDst.String()))
 
 	infraVnetKey := ""
 	if targetEp.EnableInfraVnet {
@@ -466,15 +473,15 @@ func (nm *networkManager) updateRoutes(existingEp *EndpointInfo, targetEp *Endpo
 		}
 	}
 
-	log.Printf("Key for route to infra vnet: %+v", infraVnetKey)
+	logger.Info("Key for route to infra vnet", zap.String("infraVnetKey", infraVnetKey))
 	for _, route := range existingEp.Routes {
 		destination := route.Dst.IP.String()
-		log.Printf("Checking destination as %+v to skip or not", destination)
+		logger.Info("Checking destination as to skip or not", zap.String("destination", destination))
 		isDefaultRoute := destination == defaultDst.String()
 		isInfraVnetRoute := targetEp.EnableInfraVnet && (destination == infraVnetKey)
 		if !isDefaultRoute && !isInfraVnetRoute {
 			existingRoutes[route.Dst.String()] = route
-			log.Printf("%+v was skipped", destination)
+			logger.Info("was skipped", zap.String("destination", destination))
 		}
 	}
 
@@ -486,7 +493,7 @@ func (nm *networkManager) updateRoutes(existingEp *EndpointInfo, targetEp *Endpo
 		dst := existingRoute.Dst.String()
 		if _, ok := targetRoutes[dst]; !ok {
 			tobeDeletedRoutes = append(tobeDeletedRoutes, existingRoute)
-			log.Printf("Adding following route to the tobeDeleted list: %+v", existingRoute)
+			logger.Info("Adding following route to the tobeDeleted list", zap.Any("existingRoute", existingRoute))
 		}
 	}
 
@@ -494,7 +501,7 @@ func (nm *networkManager) updateRoutes(existingEp *EndpointInfo, targetEp *Endpo
 		dst := targetRoute.Dst.String()
 		if _, ok := existingRoutes[dst]; !ok {
 			tobeAddedRoutes = append(tobeAddedRoutes, targetRoute)
-			log.Printf("Adding following route to the tobeAdded list: %+v", targetRoute)
+			logger.Info("Adding following route to the tobeAdded list", zap.Any("targetRoute", targetRoute))
 		}
 
 	}
@@ -509,7 +516,7 @@ func (nm *networkManager) updateRoutes(existingEp *EndpointInfo, targetEp *Endpo
 		return err
 	}
 
-	log.Printf("Successfully updated routes for the endpoint %+v using target: %+v", existingEp, targetEp)
+	logger.Info("Successfully updated routes for the endpoint using target", zap.Any("existingEp", existingEp), zap.Any("targetEp", targetEp))
 
 	return nil
 }
@@ -523,4 +530,10 @@ func getDefaultGateway(routes []RouteInfo) net.IP {
 	}
 
 	return nil
+}
+
+// GetEndpointInfoByIPImpl returns an endpointInfo that contains corresponding HostVethName.
+// TODO: It needs to be tested to see if HostVethName is required for SingleTenancy, WorkItem: 26606939
+func (epInfo *EndpointInfo) GetEndpointInfoByIPImpl(_ []net.IPNet, _ string) (*EndpointInfo, error) {
+	return epInfo, nil
 }

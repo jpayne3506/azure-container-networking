@@ -25,13 +25,13 @@ controller-gen
 build/tools/bin
 npm/debug/http
 
-# certificates
-*/**/certs/
-*.crt
-*.pem
-*.srl
-
 go.work*
 
 # scale-test
 test/scale/generated/*
+
+# test env file
+*.env
+
+# omit e2e bin
+test/e2e/bin/*

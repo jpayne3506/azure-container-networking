@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-container-networking/cns"
-	"github.com/Azure/azure-container-networking/cns/restserver"
 	"github.com/Azure/azure-container-networking/cns/types"
 	"github.com/pkg/errors"
 )
@@ -45,6 +44,7 @@ var clientPaths = []string{
 	cns.DeleteNetworkContainer,
 	cns.NetworkContainersURLPath,
 	cns.GetHomeAz,
+	cns.EndpointAPI,
 }
 
 type do interface {
@@ -55,6 +55,14 @@ type do interface {
 type Client struct {
 	client do
 	routes map[string]url.URL
+}
+
+type ConnectionFailureErr struct {
+	cause error
+}
+
+func (e *ConnectionFailureErr) Error() string {
+	return e.cause.Error()
 }
 
 // New returns a new CNS client configured with the passed URL and timeout.
@@ -354,7 +362,9 @@ func (c *Client) ReleaseIPAddress(ctx context.Context, ipconfig cns.IPConfigRequ
 	req.Header.Set(headerContentType, contentTypeJSON)
 	res, err := c.client.Do(req)
 	if err != nil {
-		return errors.Wrap(err, "http request failed")
+		return &ConnectionFailureErr{
+			cause: err,
+		}
 	}
 	defer res.Body.Close()
 
@@ -445,7 +455,9 @@ func (c *Client) ReleaseIPs(ctx context.Context, ipconfig cns.IPConfigsRequest) 
 	req.Header.Set(headerContentType, contentTypeJSON)
 	res, err := c.client.Do(req)
 	if err != nil {
-		return errors.Wrap(err, "http request failed")
+		return &ConnectionFailureErr{
+			cause: err,
+		}
 	}
 	defer res.Body.Close()
 
@@ -550,7 +562,7 @@ func (c *Client) GetPodOrchestratorContext(ctx context.Context) (map[string][]st
 }
 
 // GetHTTPServiceData gets all public in-memory struct details for debugging purpose
-func (c *Client) GetHTTPServiceData(ctx context.Context) (*restserver.GetHTTPServiceDataResponse, error) {
+func (c *Client) GetHTTPServiceData(ctx context.Context) (*cns.GetHTTPServiceDataResponse, error) {
 	u := c.routes[cns.PathDebugRestData]
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -570,7 +582,7 @@ func (c *Client) GetHTTPServiceData(ctx context.Context) (*restserver.GetHTTPSer
 	if res.StatusCode != http.StatusOK {
 		return nil, errors.Errorf("http response %d", res.StatusCode)
 	}
-	var resp restserver.GetHTTPServiceDataResponse
+	var resp cns.GetHTTPServiceDataResponse
 	err = json.NewDecoder(bytes.NewReader(b)).Decode(&resp)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to decode GetHTTPServiceDataResponse")
@@ -1008,4 +1020,83 @@ func (c *Client) GetHomeAz(ctx context.Context) (*cns.GetHomeAzResponse, error) 
 	}
 
 	return &getHomeAzResponse, nil
+}
+
+// GetEndpoint calls the EndpointHandlerAPI in CNS to retrieve the state of a given EndpointID
+func (c *Client) GetEndpoint(ctx context.Context, endpointID string) (*cns.GetEndpointResponse, error) {
+	// build the request
+	u := c.routes[cns.EndpointAPI]
+	uString := u.String() + endpointID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uString, http.NoBody)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to build request")
+	}
+	req.Header.Set(headerContentType, contentTypeJSON)
+	res, err := c.client.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "http request failed")
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("http response %d", res.StatusCode)
+	}
+
+	var response cns.GetEndpointResponse
+	err = json.NewDecoder(res.Body).Decode(&response)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to decode GetEndpointResponse")
+	}
+
+	if response.Response.ReturnCode != 0 {
+		return nil, errors.New(response.Response.Message)
+	}
+
+	return &response, nil
+}
+
+// UpdateEndpoint calls the EndpointHandlerAPI in CNS
+// to update the state of a given EndpointID with either HNSEndpointID or HostVethName
+func (c *Client) UpdateEndpoint(ctx context.Context, endpointID, hnsID, vethName string) (*cns.Response, error) {
+	// build the request
+	updateEndpoint := cns.EndpointRequest{
+		HnsEndpointID: hnsID,
+		HostVethName:  vethName,
+	}
+	var body bytes.Buffer
+
+	if err := json.NewEncoder(&body).Encode(updateEndpoint); err != nil {
+		return nil, errors.Wrap(err, "failed to encode updateEndpoint")
+	}
+
+	u := c.routes[cns.EndpointAPI]
+	uString := u.String() + endpointID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, uString, &body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to build request")
+	}
+	req.Header.Set(headerContentType, contentTypeJSON)
+	res, err := c.client.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "http request failed with error from server")
+	}
+
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("http response %d", res.StatusCode)
+	}
+
+	var response cns.Response
+	err = json.NewDecoder(res.Body).Decode(&response)
+
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to decode CNS Response")
+	}
+
+	if response.ReturnCode != 0 {
+		return nil, errors.New(response.Message)
+	}
+
+	return &response, nil
 }

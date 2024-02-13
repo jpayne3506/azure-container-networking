@@ -4,15 +4,21 @@
 package restserver
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-container-networking/cns"
+	cnsclient "github.com/Azure/azure-container-networking/cns/client"
 	"github.com/Azure/azure-container-networking/cns/common"
+	"github.com/Azure/azure-container-networking/cns/configuration"
 	"github.com/Azure/azure-container-networking/cns/fakes"
+	"github.com/Azure/azure-container-networking/cns/logger"
+	"github.com/Azure/azure-container-networking/cns/middlewares/mock"
 	"github.com/Azure/azure-container-networking/cns/types"
 	"github.com/Azure/azure-container-networking/crd/nodenetworkconfig/api/v1alpha"
 	"github.com/Azure/azure-container-networking/store"
@@ -96,10 +102,10 @@ func requestIPAddressAndGetState(t *testing.T, req cns.IPConfigsRequest) ([]cns.
 	}
 
 	for i := range podIPInfo {
-		assert.Equal(t, primaryIp, podIPInfo[i].NetworkContainerPrimaryIPConfig.IPSubnet.IPAddress)
+		assert.Equal(t, primaryIP, podIPInfo[i].NetworkContainerPrimaryIPConfig.IPSubnet.IPAddress)
 		assert.Equal(t, subnetPrfixLength, int(podIPInfo[i].NetworkContainerPrimaryIPConfig.IPSubnet.PrefixLength))
 		assert.Equal(t, dnsservers, podIPInfo[i].NetworkContainerPrimaryIPConfig.DNSServers)
-		assert.Equal(t, gatewayIp, podIPInfo[i].NetworkContainerPrimaryIPConfig.GatewayIPAddress)
+		assert.Equal(t, gatewayIP, podIPInfo[i].NetworkContainerPrimaryIPConfig.GatewayIPAddress)
 		assert.Equal(t, subnetPrfixLength, int(podIPInfo[i].PodIPConfig.PrefixLength))
 		assert.Equal(t, fakes.HostPrimaryIP, podIPInfo[i].HostPrimaryIPInfo.PrimaryIP)
 		assert.Equal(t, fakes.HostSubnet, podIPInfo[i].HostPrimaryIPInfo.Subnet)
@@ -1481,7 +1487,7 @@ func TestIPAMFailToReleasePartialIPsInPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected to not fail adding empty NC to state: %+v", err)
 	}
-	// remove the IP from the from the ipconfig map so that it throws an error when trying to release one of the IPs
+	// remove the IP from the ipconfig map so that it throws an error when trying to release one of the IPs
 	delete(svc.PodIPConfigState, testStatev6.ID)
 
 	err = svc.releaseIPConfigs(testPod1Info)
@@ -1511,7 +1517,7 @@ func TestIPAMFailToRequestPartialIPsInPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected to not fail adding empty NC to state: %+v", err)
 	}
-	// remove the IP from the from the ipconfig map so that it throws an error when trying to release one of the IPs
+	// remove the IP from the ipconfig map so that it throws an error when trying to release one of the IPs
 	delete(svc.PodIPConfigState, testStatev6.ID)
 
 	req := cns.IPConfigsRequest{
@@ -1528,4 +1534,212 @@ func TestIPAMFailToRequestPartialIPsInPool(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected fail requesting IPs due to only having one in the ipconfig map, IPs in the pool will not be assigned")
 	}
+}
+
+func TestIPAMReleaseSWIFTV2PodIPSuccess(t *testing.T) {
+	svc := getTestService()
+	middleware := K8sSWIFTv2Middleware{Cli: mock.NewClient()}
+	svc.AttachIPConfigsHandlerMiddleware(&middleware)
+
+	t.Setenv(configuration.EnvPodCIDRs, "10.0.1.10/24")
+	t.Setenv(configuration.EnvServiceCIDRs, "10.0.2.10/24")
+	t.Setenv(configuration.EnvInfraVNETCIDRs, "10.0.3.10/24")
+
+	ncStates := []ncState{
+		{
+			ncID: testNCID,
+			ips: []string{
+				testIP1,
+			},
+		},
+		{
+			ncID: testNCIDv6,
+			ips: []string{
+				testIP1v6,
+			},
+		},
+	}
+
+	// Add Available Pod IP to state
+	for i := range ncStates {
+		ipconfigs := make(map[string]cns.IPConfigurationStatus, 0)
+		state := NewPodState(ncStates[i].ips[0], ipIDs[i][0], ncStates[i].ncID, types.Available, 0)
+		ipconfigs[state.ID] = state
+		err := UpdatePodIPConfigState(t, svc, ipconfigs, ncStates[i].ncID)
+		if err != nil {
+			t.Fatalf("Expected to not fail adding IPs to state: %+v", err)
+		}
+	}
+
+	req := cns.IPConfigsRequest{
+		PodInterfaceID:   testPod1Info.InterfaceID(),
+		InfraContainerID: testPod1Info.InfraContainerID(),
+	}
+	b, _ := testPod1Info.OrchestratorContext()
+	req.OrchestratorContext = b
+	req.DesiredIPAddresses = make([]string, 2)
+	req.DesiredIPAddresses[0] = testIP1
+	req.DesiredIPAddresses[1] = testIP1v6
+	// Requesting release ip config for SWIFT V2 pod when mtpnc is not ready, should be a no-op
+	_, err := svc.releaseIPConfigHandlerHelper(context.TODO(), req)
+	if err != nil {
+		t.Fatalf("Expected not to fail when requesting to release SWIFT V2 pod due to MTPNC not ready")
+	}
+}
+
+func TestIPAMGetK8sSWIFTv2IPSuccess(t *testing.T) {
+	svc := getTestService()
+	middleware := K8sSWIFTv2Middleware{Cli: mock.NewClient()}
+	svc.AttachIPConfigsHandlerMiddleware(&middleware)
+
+	t.Setenv(configuration.EnvPodCIDRs, "10.0.1.10/24")
+	t.Setenv(configuration.EnvServiceCIDRs, "10.0.2.10/24")
+	t.Setenv(configuration.EnvInfraVNETCIDRs, "10.0.3.10/24")
+
+	ncStates := []ncState{
+		{
+			ncID: testNCID,
+			ips: []string{
+				testIP1,
+			},
+		},
+		{
+			ncID: testNCIDv6,
+			ips: []string{
+				testIP1v6,
+			},
+		},
+	}
+
+	// Add Available Pod IP to state
+	for i := range ncStates {
+		ipconfigs := make(map[string]cns.IPConfigurationStatus, 0)
+		state := NewPodState(ncStates[i].ips[0], ipIDs[i][0], ncStates[i].ncID, types.Available, 0)
+		ipconfigs[state.ID] = state
+		err := UpdatePodIPConfigState(t, svc, ipconfigs, ncStates[i].ncID)
+		if err != nil {
+			t.Fatalf("Expected to not fail adding IPs to state: %+v", err)
+		}
+	}
+
+	req := cns.IPConfigsRequest{
+		PodInterfaceID:   testPod1Info.InterfaceID(),
+		InfraContainerID: testPod1Info.InfraContainerID(),
+	}
+	b, _ := testPod1Info.OrchestratorContext()
+	req.OrchestratorContext = b
+	req.DesiredIPAddresses = make([]string, 2)
+	req.DesiredIPAddresses[0] = testIP1
+	req.DesiredIPAddresses[1] = testIP1v6
+
+	wrappedHandler := svc.IPConfigsHandlerMiddleware.IPConfigsRequestHandlerWrapper(svc.requestIPConfigHandlerHelper, svc.releaseIPConfigHandlerHelper)
+	resp, err := wrappedHandler(context.TODO(), req)
+	if err != nil {
+		t.Fatalf("Expected to not fail requesting IPs: %+v", err)
+	}
+	podIPInfo := resp.PodIPInfo
+
+	if len(podIPInfo) != 3 {
+		t.Fatalf("Expected to get 3 pod IP info (IPv4, IPv6, Multitenant IP), actual %d", len(podIPInfo))
+	}
+
+	// Asserting that SWIFT v2 IP is returned
+	assert.Equal(t, SWIFTv2IP, podIPInfo[2].PodIPConfig.IPAddress)
+	assert.Equal(t, SWIFTv2MAC, podIPInfo[2].MacAddress)
+	assert.Equal(t, cns.DelegatedVMNIC, podIPInfo[2].NICType)
+	assert.False(t, podIPInfo[2].SkipDefaultRoutes)
+}
+
+func TestIPAMGetK8sSWIFTv2IPFailure(t *testing.T) {
+	svc := getTestService()
+	middleware := K8sSWIFTv2Middleware{Cli: mock.NewClient()}
+	svc.AttachIPConfigsHandlerMiddleware(&middleware)
+	ncStates := []ncState{
+		{
+			ncID: testNCID,
+			ips: []string{
+				testIP1,
+			},
+		},
+		{
+			ncID: testNCIDv6,
+			ips: []string{
+				testIP1v6,
+			},
+		},
+	}
+	// Add Available Pod IP to state
+	for i := range ncStates {
+		ipconfigs := make(map[string]cns.IPConfigurationStatus, 0)
+		state := NewPodState(ncStates[i].ips[0], ipIDs[i][0], ncStates[i].ncID, types.Available, 0)
+		ipconfigs[state.ID] = state
+		err := UpdatePodIPConfigState(t, svc, ipconfigs, ncStates[i].ncID)
+		if err != nil {
+			t.Fatalf("Expected to not fail adding IPs to state: %+v", err)
+		}
+	}
+	// MTPNC not ready for this pod
+	req := cns.IPConfigsRequest{
+		PodInterfaceID:   testPod2Info.InterfaceID(),
+		InfraContainerID: testPod2Info.InfraContainerID(),
+	}
+	b, _ := testPod2Info.OrchestratorContext()
+	req.OrchestratorContext = b
+	req.DesiredIPAddresses = make([]string, 2)
+	req.DesiredIPAddresses[0] = testIP1
+	req.DesiredIPAddresses[1] = testIP1v6
+	wrappedHandler := svc.IPConfigsHandlerMiddleware.IPConfigsRequestHandlerWrapper(svc.requestIPConfigHandlerHelper, svc.releaseIPConfigHandlerHelper)
+	_, err := wrappedHandler(context.TODO(), req)
+	if err == nil {
+		t.Fatalf("Expected failing requesting IPs due to MTPNC not ready")
+	}
+	available := svc.GetAvailableIPConfigs()
+	if len(available) != 2 {
+		t.Fatalf("Expected available ips to be 2 since we expect the IP to not be assigned. Available IPs: %d", len(available))
+	}
+
+	// MTPNC is ready for this pod but env vars not set
+	req = cns.IPConfigsRequest{
+		PodInterfaceID:   testPod1Info.InterfaceID(),
+		InfraContainerID: testPod1Info.InfraContainerID(),
+	}
+	b, _ = testPod1Info.OrchestratorContext()
+	req.OrchestratorContext = b
+	req.DesiredIPAddresses = make([]string, 2)
+	req.DesiredIPAddresses[0] = testIP1
+	req.DesiredIPAddresses[1] = testIP1v6
+
+	_, err = wrappedHandler(context.TODO(), req)
+	if err == nil {
+		t.Fatalf("Expected failing requesting IPs due to not able to set routes")
+	}
+
+	available = svc.GetAvailableIPConfigs()
+	if len(available) != 2 {
+		t.Fatal("Expected available ips to be 2 since we expect the IP to not be assigned")
+	}
+}
+
+func TestValidateSFIPConfigsRequestFailure(t *testing.T) {
+	svc := getTestService()
+	cnsClient, err := cnsclient.New("", 15*time.Second)
+	if err != nil {
+		logger.Errorf("Failed to init cnsclient, err:%v.\n", err)
+		return
+	}
+	middleware := SFSWIFTv2Middleware{CnsClient: cnsClient}
+	svc.AttachIPConfigsHandlerMiddleware(&middleware)
+
+	// Fail to unmarshal pod info test
+	failReq := cns.IPConfigsRequest{
+		PodInterfaceID:   testPod1Info.InterfaceID(),
+		InfraContainerID: testPod1Info.InfraContainerID(),
+	}
+	failReq.OrchestratorContext = []byte("invalid")
+
+	wrappedHandler := svc.IPConfigsHandlerMiddleware.IPConfigsRequestHandlerWrapper(svc.requestIPConfigHandlerHelper, svc.releaseIPConfigHandlerHelper)
+	resp, err := wrappedHandler(context.TODO(), failReq)
+
+	assert.NotEmpty(t, err)
+	assert.Equal(t, types.UnexpectedError, resp.Response.ReturnCode)
 }

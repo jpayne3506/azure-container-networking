@@ -13,19 +13,39 @@ import (
 	"github.com/pkg/errors"
 )
 
+type SWIFTV2Mode string
+
 const (
 	// EnvCNSConfig is the CNS_CONFIGURATION_PATH env var key
 	EnvCNSConfig      = "CNS_CONFIGURATION_PATH"
 	defaultConfigName = "cns_config.json"
+	// Service Fabric SWIFTV2 mode
+	SFSWIFTV2 SWIFTV2Mode = "SFSWIFTV2"
+	// K8s SWIFTV2 mode
+	K8sSWIFTV2 SWIFTV2Mode = "K8sSWIFTV2"
 )
 
 type CNSConfig struct {
+	AZRSettings                 AZRSettings
+	AsyncPodDeletePath          string
+	CNIConflistFilepath         string
+	CNIConflistScenario         string
 	ChannelMode                 string
+	EnableAsyncPodDelete        bool
+	EnableCNIConflistGeneration bool
+	EnableIPAMv2                bool
 	EnablePprof                 bool
+	EnableStateMigration        bool
 	EnableSubnetScarcity        bool
 	InitializeFromCNI           bool
+	KeyVaultSettings            KeyVaultSettings
+	MSISettings                 MSISettings
+	ManageEndpointState         bool
 	ManagedSettings             ManagedSettings
+	MellanoxMonitorIntervalSecs int
 	MetricsBindAddress          string
+	ProgramSNATIPTables         bool
+	SWIFTV2Mode                 SWIFTV2Mode
 	SyncHostNCTimeoutMs         int
 	SyncHostNCVersionIntervalMs int
 	TLSCertificatePath          string
@@ -34,16 +54,8 @@ type CNSConfig struct {
 	TLSSubjectName              string
 	TelemetrySettings           TelemetrySettings
 	UseHTTPS                    bool
+	WatchPods                   bool `json:"-"`
 	WireserverIP                string
-	KeyVaultSettings            KeyVaultSettings
-	MSISettings                 MSISettings
-	ProgramSNATIPTables         bool
-	ManageEndpointState         bool
-	CNIConflistScenario         string
-	EnableCNIConflistGeneration bool
-	CNIConflistFilepath         string
-	MellanoxMonitorIntervalSecs int
-	AZRSettings                 AZRSettings
 }
 
 type TelemetrySettings struct {
@@ -205,4 +217,8 @@ func SetCNSConfigDefaults(config *CNSConfig) {
 	if config.WireserverIP == "" {
 		config.WireserverIP = "168.63.129.16"
 	}
+	if config.AsyncPodDeletePath == "" {
+		config.AsyncPodDeletePath = "/var/run/azure-vnet/deleteIDs"
+	}
+	config.WatchPods = config.EnableIPAMv2 || config.SWIFTV2Mode == K8sSWIFTV2
 }

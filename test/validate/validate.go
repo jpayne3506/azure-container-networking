@@ -2,9 +2,10 @@ package validate
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 
-	k8sutils "github.com/Azure/azure-container-networking/test/internal/k8sutils"
+	acnk8s "github.com/Azure/azure-container-networking/test/internal/kubernetes"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -21,9 +22,22 @@ var nodeSelectorMap = map[string]string{
 	"linux":   "kubernetes.io/os=linux",
 }
 
+// IPv4 overlay Linux and windows nodes must have this label
+var v4OverlayNodeLabels = map[string]string{
+	"kubernetes.azure.com/podnetwork-type": "overlay",
+}
+
+// dualstack overlay Linux and windows nodes must have these labels
+var dualstackOverlayNodeLabels = map[string]string{
+	"kubernetes.azure.com/podnetwork-type":   "overlay",
+	"kubernetes.azure.com/podv6network-type": "overlay",
+}
+
 const (
-	privilegedLabelSelector = "app=privileged-daemonset"
-	privilegedNamespace     = "kube-system"
+	privilegedLabelSelector  = "app=privileged-daemonset"
+	privilegedNamespace      = "kube-system"
+	IPv4ExpectedIPCount      = 1
+	DualstackExpectedIPCount = 2
 )
 
 type Validator struct {
@@ -44,24 +58,25 @@ type check struct {
 	cmd              []string
 }
 
-func CreateValidator(ctx context.Context, clienset *kubernetes.Clientset, config *rest.Config, namespace, cni string, restartCase bool, os string) (*Validator, error) {
+func CreateValidator(ctx context.Context, clientset *kubernetes.Clientset, config *rest.Config, namespace, cni string, restartCase bool, os string) (*Validator, error) {
 	// deploy privileged pod
-	privilegedDaemonSet, err := k8sutils.MustParseDaemonSet(privilegedDaemonSetPathMap[os])
-	if err != nil {
-		return nil, errors.Wrap(err, "unable to parse daemonset")
-	}
-	daemonsetClient := clienset.AppsV1().DaemonSets(privilegedNamespace)
-	if err := k8sutils.MustCreateDaemonset(ctx, daemonsetClient, privilegedDaemonSet); err != nil {
-		return nil, errors.Wrap(err, "unable to create daemonset")
-	}
-	if err := k8sutils.WaitForPodsRunning(ctx, clienset, privilegedNamespace, privilegedLabelSelector); err != nil {
-		return nil, errors.Wrap(err, "error while waiting for pods to be running")
+	privilegedDaemonSet := acnk8s.MustParseDaemonSet(privilegedDaemonSetPathMap[os])
+	daemonsetClient := clientset.AppsV1().DaemonSets(privilegedNamespace)
+	acnk8s.MustCreateDaemonset(ctx, daemonsetClient, privilegedDaemonSet)
+
+	// Ensures that pods have been replaced if test is re-run after failure
+	if err := acnk8s.WaitForPodDaemonset(ctx, clientset, privilegedNamespace, privilegedDaemonSet.Name, privilegedLabelSelector); err != nil {
+		return nil, errors.Wrap(err, "unable to wait for daemonset")
 	}
 
 	var checks []check
 	switch os {
 	case "windows":
 		checks = windowsChecksMap[cni]
+		err := acnk8s.RestartKubeProxyService(ctx, clientset, privilegedNamespace, privilegedLabelSelector, config)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to restart kubeproxy")
+		}
 	case "linux":
 		checks = linuxChecksMap[cni]
 	default:
@@ -69,7 +84,7 @@ func CreateValidator(ctx context.Context, clienset *kubernetes.Clientset, config
 	}
 
 	return &Validator{
-		clientset:   clienset,
+		clientset:   clientset,
 		config:      config,
 		namespace:   namespace,
 		cni:         cni,
@@ -89,7 +104,7 @@ func (v *Validator) Validate(ctx context.Context) error {
 	if v.os == "linux" {
 		// We are restarting the systmemd network and checking that the connectivity works after the restart. For more details: https://github.com/cilium/cilium/issues/18706
 		log.Printf("Validating the restart network scenario")
-		err = v.ValidateRestartNetwork(ctx)
+		err = v.validateRestartNetwork(ctx)
 		if err != nil {
 			return errors.Wrapf(err, "failed to validate restart network scenario")
 		}
@@ -107,55 +122,31 @@ func (v *Validator) ValidateStateFile(ctx context.Context) error {
 	return nil
 }
 
-func (v *Validator) ValidateRestartNetwork(ctx context.Context) error {
-	nodes, err := k8sutils.GetNodeList(ctx, v.clientset)
-	if err != nil {
-		return errors.Wrapf(err, "failed to get node list")
-	}
-
-	for index := range nodes.Items {
-		// get the privileged pod
-		pod, err := k8sutils.GetPodsByNode(ctx, v.clientset, privilegedNamespace, privilegedLabelSelector, nodes.Items[index].Name)
-		if err != nil {
-			return errors.Wrapf(err, "failed to get privileged pod")
-		}
-
-		privelegedPod := pod.Items[0]
-		// exec into the pod to get the state file
-		_, err = k8sutils.ExecCmdOnPod(ctx, v.clientset, privilegedNamespace, privelegedPod.Name, restartNetworkCmd, v.config)
-		if err != nil {
-			return errors.Wrapf(err, "failed to exec into privileged pod")
-		}
-		err = k8sutils.WaitForPodsRunning(ctx, v.clientset, "", "")
-		if err != nil {
-			return errors.Wrapf(err, "failed to wait for pods running")
-		}
-	}
-	return nil
-}
-
 func (v *Validator) validateIPs(ctx context.Context, stateFileIps stateFileIpsFunc, cmd []string, checkType, namespace, labelSelector string) error {
 	log.Printf("Validating %s state file", checkType)
-	nodes, err := k8sutils.GetNodeListByLabelSelector(ctx, v.clientset, nodeSelectorMap[v.os])
+	nodes, err := acnk8s.GetNodeListByLabelSelector(ctx, v.clientset, nodeSelectorMap[v.os])
 	if err != nil {
 		return errors.Wrapf(err, "failed to get node list")
 	}
 
 	for index := range nodes.Items {
 		// get the privileged pod
-		pod, err := k8sutils.GetPodsByNode(ctx, v.clientset, namespace, labelSelector, nodes.Items[index].Name)
+		pod, err := acnk8s.GetPodsByNode(ctx, v.clientset, namespace, labelSelector, nodes.Items[index].Name)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get privileged pod")
+		}
+		if len(pod.Items) == 0 {
+			return errors.Errorf("there are no privileged pods on node - %v", nodes.Items[index].Name)
 		}
 		podName := pod.Items[0].Name
 		// exec into the pod to get the state file
-		result, err := k8sutils.ExecCmdOnPod(ctx, v.clientset, namespace, podName, cmd, v.config)
+		result, err := acnk8s.ExecCmdOnPod(ctx, v.clientset, namespace, podName, cmd, v.config)
 		if err != nil {
-			return errors.Wrapf(err, "failed to exec into privileged pod")
+			return errors.Wrapf(err, "failed to exec into privileged pod - %s", podName)
 		}
 		filePodIps, err := stateFileIps(result)
 		if err != nil {
-			return errors.Wrapf(err, "failed to get pod ips from state file")
+			return errors.Wrapf(err, "failed to get pod ips from state file on node %v", nodes.Items[index].Name)
 		}
 		if len(filePodIps) == 0 && v.restartCase {
 			log.Printf("No pods found on node %s", nodes.Items[index].Name)
@@ -164,22 +155,16 @@ func (v *Validator) validateIPs(ctx context.Context, stateFileIps stateFileIpsFu
 		// get the pod ips
 		podIps := getPodIPsWithoutNodeIP(ctx, v.clientset, nodes.Items[index])
 
-		check := compareIPs(filePodIps, podIps)
-
-		if !check {
-			return errors.Wrapf(errors.New("State file validation failed"), "for %s on node %s", checkType, nodes.Items[index].Name)
+		if err := compareIPs(filePodIps, podIps); err != nil {
+			return errors.Wrapf(err, "State file validation failed for %s on node %s", checkType, nodes.Items[index].Name)
 		}
 	}
 	log.Printf("State file validation for %s passed", checkType)
 	return nil
 }
 
-func (v *Validator) validateDualStackNodeProperties(ctx context.Context) error {
-	log.Print("Validating Dualstack Overlay Node properties")
-	nodes, err := k8sutils.GetNodeListByLabelSelector(ctx, v.clientset, nodeSelectorMap[v.os])
-	if err != nil {
-		return errors.Wrapf(err, "failed to get node list")
-	}
+func validateNodeProperties(nodes *corev1.NodeList, labels map[string]string, expectedIPCount int) error {
+	log.Print("Validating Node properties")
 
 	for index := range nodes.Items {
 		nodeName := nodes.Items[index].ObjectMeta.Name
@@ -187,29 +172,47 @@ func (v *Validator) validateDualStackNodeProperties(ctx context.Context) error {
 		// nodes status should be ready after cluster is created
 		nodeConditions := nodes.Items[index].Status.Conditions
 		if nodeConditions[len(nodeConditions)-1].Type != corev1.NodeReady {
-			return errors.Wrapf(err, "node %s status is not ready", nodeName)
+			return errors.Errorf("node %s status is not ready", nodeName)
 		}
 
 		// get node labels
 		nodeLabels := nodes.Items[index].ObjectMeta.GetLabels()
 		for key := range nodeLabels {
-			if label, ok := dualstackOverlayNodeLabels[key]; ok {
+			if label, ok := labels[key]; ok {
 				log.Printf("label %s is correctly shown on the node %+v", key, nodeName)
 				if label != overlayClusterLabelName {
-					return errors.Wrapf(err, "node %s overlay label name is wrong; expected label:%s but actual label:%s", nodeName, overlayClusterLabelName, label)
+					return errors.Errorf("node %s overlay label name is wrong; expected label:%s but actual label:%s", nodeName, overlayClusterLabelName, label)
 				}
 			}
 		}
 
-		// check if node has two internal IPs(one is IPv4 and another is IPv6)
+		// check if node has correct number of internal IPs
 		internalIPCount := 0
 		for _, address := range nodes.Items[index].Status.Addresses {
 			if address.Type == "InternalIP" {
 				internalIPCount++
 			}
 		}
-		if internalIPCount != 2 { //nolint
-			return errors.Wrap(err, "node does not have two internal IPs")
+		if internalIPCount != expectedIPCount {
+			return errors.Errorf("number of node internal IPs: %d does not match expected number of IPs %d", internalIPCount, expectedIPCount)
+		}
+	}
+	return nil
+}
+
+func (v *Validator) ValidateV4OverlayControlPlane(ctx context.Context) error {
+	nodes, err := acnk8s.GetNodeListByLabelSelector(ctx, v.clientset, nodeSelectorMap[v.os])
+	if err != nil {
+		return errors.Wrap(err, "failed to get node list")
+	}
+
+	if err := validateNodeProperties(nodes, v4OverlayNodeLabels, IPv4ExpectedIPCount); err != nil {
+		return errors.Wrap(err, "failed to validate IPv4 overlay node properties")
+	}
+
+	if v.os == "windows" {
+		if err := validateHNSNetworkState(ctx, nodes, v.clientset, v.config); err != nil {
+			return errors.Wrap(err, "failed to validate IPv4 overlay HNS network state")
 		}
 	}
 
@@ -217,9 +220,42 @@ func (v *Validator) validateDualStackNodeProperties(ctx context.Context) error {
 }
 
 func (v *Validator) ValidateDualStackControlPlane(ctx context.Context) error {
-	if err := v.validateDualStackNodeProperties(ctx); err != nil {
+	nodes, err := acnk8s.GetNodeListByLabelSelector(ctx, v.clientset, nodeSelectorMap[v.os])
+	if err != nil {
+		return errors.Wrap(err, "failed to get node list")
+	}
+
+	if err := validateNodeProperties(nodes, dualstackOverlayNodeLabels, DualstackExpectedIPCount); err != nil {
 		return errors.Wrap(err, "failed to validate dualstack overlay node properties")
 	}
 
+	if v.os == "windows" {
+		if err := validateHNSNetworkState(ctx, nodes, v.clientset, v.config); err != nil {
+			return errors.Wrap(err, "failed to validate dualstack overlay HNS network state")
+		}
+	}
+
 	return nil
+}
+
+func (v *Validator) Cleanup(ctx context.Context) {
+	// deploy privileged pod
+	privilegedDaemonSet := acnk8s.MustParseDaemonSet(privilegedDaemonSetPathMap[v.os])
+	daemonsetClient := v.clientset.AppsV1().DaemonSets(privilegedNamespace)
+	acnk8s.MustDeleteDaemonset(ctx, daemonsetClient, privilegedDaemonSet)
+}
+
+func cnsCacheStateFileIps(result []byte) (map[string]string, error) {
+	var cnsLocalCache CNSLocalCache
+
+	err := json.Unmarshal(result, &cnsLocalCache)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to unmarshal cns local cache")
+	}
+
+	cnsPodIps := make(map[string]string)
+	for index := range cnsLocalCache.IPConfigurationStatus {
+		cnsPodIps[cnsLocalCache.IPConfigurationStatus[index].IPAddress] = cnsLocalCache.IPConfigurationStatus[index].PodInfo.Name()
+	}
+	return cnsPodIps, nil
 }

@@ -4,29 +4,32 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/Azure/azure-container-networking/test/internal/k8sutils"
+	acnk8s "github.com/Azure/azure-container-networking/test/internal/kubernetes"
+	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
-func compareIPs(expected map[string]string, actual []string) bool {
-	if len(expected) != len(actual) {
-		return false
-	}
+func compareIPs(expected map[string]string, actual []string) error {
+	expectedLen := len(expected)
 
 	for _, ip := range actual {
 		if _, ok := expected[ip]; !ok {
-			return false
+			return errors.Errorf("actual ip %s is unexpected, expected: %+v, actual: %+v", ip, expected, actual)
 		}
+		delete(expected, ip)
+	}
+	if expectedLen != len(actual) {
+		return errors.Errorf("len of expected IPs != len of actual IPs, expected: %+v, actual: %+v | Remaining, potentially leaked, IP(s) on state file - %v", expectedLen, len(actual), expected)
 	}
 
-	return true
+	return nil
 }
 
 // func to get the pods ip without the node ip (ie. host network as false)
 func getPodIPsWithoutNodeIP(ctx context.Context, clientset *kubernetes.Clientset, node corev1.Node) []string {
 	podsIpsWithoutNodeIP := []string{}
-	podIPs, err := k8sutils.GetPodsIpsByNode(ctx, clientset, "", "", node.Name)
+	podIPs, err := acnk8s.GetPodsIpsByNode(ctx, clientset, "", "", node.Name)
 	if err != nil {
 		return podsIpsWithoutNodeIP
 	}

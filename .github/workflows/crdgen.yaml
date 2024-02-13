@@ -7,30 +7,29 @@ on:
         - reopened
         - synchronize
         - ready_for_review
+  merge_group:
+    types:
+      - checks_requested
 jobs:
-  crdgen119:
+  crdgen:
     strategy:
       matrix:
-        go-version: ['1.20']
+        go-version: ['1.21']
         os: [ubuntu-latest]
     name: CRDs are Generated
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    - uses: actions/setup-go@v4
+    - uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }} 
+        go-version: ${{ matrix.go-version }}
     - name: Regenerate NodeNetworkConfig CRD
       run: make -C crd/nodenetworkconfig
     - name: Regenerate MultitenantNetworkContainer CRD
       run: make -C crd/multitenantnetworkcontainer
-    - name: Regenerate PodNetwork CRD
-      run: make -C crd/external/podnetwork
-    - name: Regenerate NodeInfo CRD
-      run: make -C crd/nodeinfo
-    - name: Regenerate MultitenantPodNetworkConfig CRD
-      run: make -C crd/multitenantpodnetworkconfig
+    - name: Regenerate Multitenancy CRDs
+      run: make -C crd/multitenancy
     - name: Fail if the tree is dirty
       run: test -z "$(git status --porcelain)"

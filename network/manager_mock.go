@@ -9,13 +9,15 @@ import (
 type MockNetworkManager struct {
 	TestNetworkInfoMap  map[string]*NetworkInfo
 	TestEndpointInfoMap map[string]*EndpointInfo
+	TestEndpointClient  *MockEndpointClient
 }
 
 // NewMockNetworkmanager returns a new mock
-func NewMockNetworkmanager() *MockNetworkManager {
+func NewMockNetworkmanager(mockEndpointclient *MockEndpointClient) *MockNetworkManager {
 	return &MockNetworkManager{
 		TestNetworkInfoMap:  make(map[string]*NetworkInfo),
 		TestEndpointInfoMap: make(map[string]*EndpointInfo),
+		TestEndpointClient:  mockEndpointclient,
 	}
 }
 
@@ -52,15 +54,44 @@ func (nm *MockNetworkManager) GetNetworkInfo(networkID string) (NetworkInfo, err
 }
 
 // CreateEndpoint mock
-func (nm *MockNetworkManager) CreateEndpoint(_ apipaClient, networkID string, epInfo *EndpointInfo) error {
-	nm.TestEndpointInfoMap[epInfo.Id] = epInfo
+func (nm *MockNetworkManager) CreateEndpoint(_ apipaClient, _ string, epInfos []*EndpointInfo) error {
+	for _, epInfo := range epInfos {
+		if err := nm.TestEndpointClient.AddEndpoints(epInfo); err != nil {
+			return err
+		}
+	}
+
+	nm.TestEndpointInfoMap[epInfos[0].Id] = epInfos[0]
 	return nil
 }
 
 // DeleteEndpoint mock
-func (nm *MockNetworkManager) DeleteEndpoint(networkID, endpointID string) error {
+func (nm *MockNetworkManager) DeleteEndpoint(_, endpointID string, _ *EndpointInfo) error {
 	delete(nm.TestEndpointInfoMap, endpointID)
 	return nil
+}
+
+// SetStatelessCNIMode enable the statelessCNI falg and inititlizes a CNSClient
+func (nm *MockNetworkManager) SetStatelessCNIMode() error {
+	return nil
+}
+
+// IsStatelessCNIMode checks if the Stateless CNI mode has been enabled or not
+func (nm *MockNetworkManager) IsStatelessCNIMode() bool {
+	return false
+}
+
+// GetEndpointID returns the ContainerID value
+func (nm *MockNetworkManager) GetEndpointID(containerID, ifName string) string {
+	if nm.IsStatelessCNIMode() {
+		return containerID
+	}
+	if len(containerID) > ContainerIDLength {
+		containerID = containerID[:ContainerIDLength]
+	} else {
+		return ""
+	}
+	return containerID + "-" + ifName
 }
 
 func (nm *MockNetworkManager) GetAllEndpoints(networkID string) (map[string]*EndpointInfo, error) {
@@ -68,7 +99,7 @@ func (nm *MockNetworkManager) GetAllEndpoints(networkID string) (map[string]*End
 }
 
 // GetEndpointInfo mock
-func (nm *MockNetworkManager) GetEndpointInfo(networkID string, endpointID string) (*EndpointInfo, error) {
+func (nm *MockNetworkManager) GetEndpointInfo(_, endpointID string) (*EndpointInfo, error) {
 	if info, exists := nm.TestEndpointInfoMap[endpointID]; exists {
 		return info, nil
 	}
