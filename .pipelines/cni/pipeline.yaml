@@ -307,6 +307,7 @@ stages:
       clusterName: "cilium-over"
       nodeCount: ${NODE_COUNT_CILIUM}
       vmSize: ${VM_SIZE_CILIUM}
+      arch: amd64
       cni: "cilium"
 
   - template: cilium/cilium-overlay-load-test-template.yaml
@@ -317,6 +318,7 @@ stages:
       hubbleEnabled: true
       nodeCount: ${NODE_COUNT_CILIUM}
       vmSize: ${VM_SIZE_CILIUM}
+      arch: amd64
       cni: "cilium"
 
   - template: cilium/cilium-overlay-load-test-template.yaml
@@ -357,6 +359,7 @@ stages:
       clusterName: "cil-ds-ov"
       nodeCount: ${NODE_COUNT_CILIUM}
       vmSize: ${VM_SIZE_CILIUM}
+      arch: amd64
       dualstackVersion: ${CILIUM_DUALSTACK_VERSION}
       cni: "cilium_dualstack"
 
